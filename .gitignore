@@ -1,2 +1,4 @@
 /.idea
 /CLAUDE.md
+.transcripts/
+.task_outputs/
