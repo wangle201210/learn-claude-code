@@ -102,9 +102,15 @@ func handlers() map[string]toolHandler {
 	return m
 }
 
-// safePath 把相对路径解析为绝对路径，并确保它没有逃出工作区。
+// safePath 把路径解析为绝对路径，并确保它没有逃出工作区。
+// 注意：绝对路径要原样保留再校验——不能与 workdir 拼接，否则像 "/tmp/x"
+// 这样的工作区外路径会被 filepath.Join 当相对片段悄悄塞进 workdir/tmp/x。
 func safePath(p string) (string, error) {
-	abs, err := filepath.Abs(filepath.Join(workdir, p))
+	joined := p
+	if !filepath.IsAbs(p) {
+		joined = filepath.Join(workdir, p)
+	}
+	abs, err := filepath.Abs(joined)
 	if err != nil {
 		return "", err
 	}
