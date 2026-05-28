@@ -38,7 +38,7 @@ func agentLoop(ctx context.Context, agent model.ToolCallingChatModel, messages [
 			} else {
 				output = "Unknown: " + name
 			}
-			fmt.Println(truncate(output, 200))
+			fmt.Println(truncate(output, 2000))
 
 			messages = append(messages, schema.ToolMessage(output, tc.ID, schema.WithToolName(name)))
 		}
