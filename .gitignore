@@ -4,3 +4,4 @@
 .task_outputs/
 .memory/
 .tasks/
+.scheduled_tasks.json
