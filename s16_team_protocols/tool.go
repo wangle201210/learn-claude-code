@@ -1,0 +1,542 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/cloudwego/eino/schema"
+)
+
+// workdir 是 agent 的工作区根目录，所有文件工具都被限制在它之内。
+var workdir, _ = os.Getwd()
+
+// toolHandler 接收工具调用的原始 JSON 参数，返回给模型的文本结果。
+type toolHandler func(ctx context.Context, args string) string
+
+// tool 把一个工具的元信息（给模型看）和执行函数（harness 调用）绑在一起。
+type tool struct {
+	info    *schema.ToolInfo
+	handler toolHandler
+}
+
+// tools 是本章的工具集：s01 只有 bash，s02 扩展到 5 个。
+// 加一个工具 = 往这里加一项，循环本身完全不用动。
+var tools = []tool{
+	{
+		info: &schema.ToolInfo{
+			Name: "bash",
+			Desc: "Run a shell command.",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"command":           {Type: schema.String, Desc: "The shell command to run.", Required: true},
+				"run_in_background": {Type: schema.Boolean, Desc: "Run this command in the background if it may take a long time (e.g. install/build/test/long sleep)."},
+			}),
+		},
+		handler: runBash,
+	},
+	{
+		info: &schema.ToolInfo{
+			Name: "read_file",
+			Desc: "Read file contents.",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"path":  {Type: schema.String, Desc: "File path relative to the workspace.", Required: true},
+				"limit": {Type: schema.Integer, Desc: "Max number of lines to read."},
+			}),
+		},
+		handler: runRead,
+	},
+	{
+		info: &schema.ToolInfo{
+			Name: "write_file",
+			Desc: "Write content to a file.",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"path":    {Type: schema.String, Desc: "File path relative to the workspace.", Required: true},
+				"content": {Type: schema.String, Desc: "The full content to write.", Required: true},
+			}),
+		},
+		handler: runWrite,
+	},
+	{
+		info: &schema.ToolInfo{
+			Name: "edit_file",
+			Desc: "Replace exact text in a file once.",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"path":     {Type: schema.String, Desc: "File path relative to the workspace.", Required: true},
+				"old_text": {Type: schema.String, Desc: "The exact text to find.", Required: true},
+				"new_text": {Type: schema.String, Desc: "The text to replace it with.", Required: true},
+			}),
+		},
+		handler: runEdit,
+	},
+	{
+		info: &schema.ToolInfo{
+			Name: "glob",
+			Desc: "Find files matching a glob pattern.",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"pattern": {Type: schema.String, Desc: "Glob pattern, e.g. '*.go' or 'sub/*.txt'.", Required: true},
+			}),
+		},
+		handler: runGlob,
+	},
+	{
+		// s05 新增：todo_write 只做规划，不执行任何实际操作。
+		info: &schema.ToolInfo{
+			Name: "todo_write",
+			Desc: "Create and manage a task list for your current coding session.",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"todos": {
+					Type:     schema.Array,
+					Desc:     "The full task list (replaces the previous one).",
+					Required: true,
+					ElemInfo: &schema.ParameterInfo{
+						Type: schema.Object,
+						SubParams: map[string]*schema.ParameterInfo{
+							"content": {Type: schema.String, Desc: "Task description.", Required: true},
+							"status":  {Type: schema.String, Desc: "Task status.", Required: true, Enum: []string{"pending", "in_progress", "completed"}},
+						},
+					},
+				},
+			}),
+		},
+		handler: runTodoWrite,
+	},
+}
+
+// task 工具在 init 里追加（而非写进上面的字面量）：它的 handler runTask 会经
+// subHandlers 间接引用 tools，写进字面量会让 Go 判定 tools 初始化自我循环。
+func init() {
+	tools = append(tools, tool{
+		// s06 新增：task 启动一个子 agent 处理复杂子任务，只返回最终结论。
+		info: &schema.ToolInfo{
+			Name: "task",
+			Desc: "Launch a subagent to handle a complex subtask. Returns only the final conclusion.",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"description": {Type: schema.String, Desc: "The subtask for the subagent to complete.", Required: true},
+			}),
+		},
+		handler: runTask,
+	})
+	tools = append(tools, tool{
+		// s07 新增：load_skill 按需加载技能完整内容（目录已在 SYSTEM 里）。
+		info: &schema.ToolInfo{
+			Name: "load_skill",
+			Desc: "Load the full content of a skill by name.",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"name": {Type: schema.String, Desc: "The skill name from the catalog.", Required: true},
+			}),
+		},
+		handler: loadSkill,
+	})
+	tools = append(tools, tool{
+		// s08 新增：compact 让模型主动压缩历史。真正逻辑在 agentLoop 里特殊处理
+		// （要替换整个 messages），这里的 handler 只是占位、正常不会被调用。
+		info: &schema.ToolInfo{
+			Name: "compact",
+			Desc: "Summarize earlier conversation to free context space.",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"focus": {Type: schema.String, Desc: "Optional: what to emphasize in the summary."},
+			}),
+		},
+		handler: func(ctx context.Context, args string) string { return "[Compacted]" },
+	})
+
+	// s12 新增：任务系统的 5 个工具（文件持久化、blockedBy 依赖图）。
+	tools = append(tools, tool{
+		info: &schema.ToolInfo{
+			Name: "create_task",
+			Desc: "Create a new task with optional blockedBy dependencies.",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"subject":     {Type: schema.String, Desc: "Short task title.", Required: true},
+				"description": {Type: schema.String, Desc: "Detailed requirements."},
+				"blockedBy":   {Type: schema.Array, Desc: "IDs of tasks that must complete first.", ElemInfo: &schema.ParameterInfo{Type: schema.String}},
+			}),
+		},
+		handler: runCreateTask,
+	})
+	tools = append(tools, tool{
+		info: &schema.ToolInfo{
+			Name:        "list_tasks",
+			Desc:        "List all tasks with status, owner, and dependencies.",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{}),
+		},
+		handler: runListTasks,
+	})
+	tools = append(tools, tool{
+		info: &schema.ToolInfo{
+			Name: "get_task",
+			Desc: "Get full details of a specific task by ID.",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"task_id": {Type: schema.String, Desc: "Task identifier.", Required: true},
+			}),
+		},
+		handler: runGetTask,
+	})
+	tools = append(tools, tool{
+		info: &schema.ToolInfo{
+			Name: "claim_task",
+			Desc: "Claim a pending task. Sets owner, changes status to in_progress.",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"task_id": {Type: schema.String, Desc: "Task identifier.", Required: true},
+			}),
+		},
+		handler: runClaimTask,
+	})
+	tools = append(tools, tool{
+		info: &schema.ToolInfo{
+			Name: "complete_task",
+			Desc: "Complete an in-progress task. Reports newly unblocked downstream tasks.",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"task_id": {Type: schema.String, Desc: "Task identifier.", Required: true},
+			}),
+		},
+		handler: runCompleteTask,
+	})
+
+	// s14 新增：cron 调度的 3 个工具。
+	tools = append(tools, tool{
+		info: &schema.ToolInfo{
+			Name: "schedule_cron",
+			Desc: "Schedule a cron job. cron is 5-field: minute hour day-of-month month day-of-week.",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"cron":      {Type: schema.String, Desc: "5-field cron expression.", Required: true},
+				"prompt":    {Type: schema.String, Desc: "Message to inject when fired.", Required: true},
+				"recurring": {Type: schema.Boolean, Desc: "true=fire on every match (default); false=one-shot."},
+				"durable":   {Type: schema.Boolean, Desc: "true=persist to .scheduled_tasks.json so it survives restart (default)."},
+			}),
+		},
+		handler: runScheduleCron,
+	})
+	tools = append(tools, tool{
+		info: &schema.ToolInfo{
+			Name:        "list_crons",
+			Desc:        "List all registered cron jobs.",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{}),
+		},
+		handler: runListCrons,
+	})
+	tools = append(tools, tool{
+		info: &schema.ToolInfo{
+			Name: "cancel_cron",
+			Desc: "Cancel a cron job by ID.",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"job_id": {Type: schema.String, Desc: "Cron job ID.", Required: true},
+			}),
+		},
+		handler: runCancelCron,
+	})
+
+	// s15 新增：lead 端的 3 个团队协作工具。
+	tools = append(tools, tool{
+		info: &schema.ToolInfo{
+			Name: "spawn_teammate",
+			Desc: "Spawn a teammate agent in the background. It will work on its own and send results back via the message bus.",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"name":   {Type: schema.String, Desc: "Teammate identifier (e.g. 'researcher').", Required: true},
+				"role":   {Type: schema.String, Desc: "Short role description."},
+				"prompt": {Type: schema.String, Desc: "Initial task description.", Required: true},
+			}),
+		},
+		handler: runSpawnTeammate,
+	})
+	tools = append(tools, tool{
+		info: &schema.ToolInfo{
+			Name: "send_message",
+			Desc: "Send a message to another agent (e.g. a teammate's name).",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"to":      {Type: schema.String, Desc: "Recipient agent name.", Required: true},
+				"content": {Type: schema.String, Desc: "Message body.", Required: true},
+			}),
+		},
+		handler: runSendMessage,
+	})
+	tools = append(tools, tool{
+		info: &schema.ToolInfo{
+			Name:        "check_inbox",
+			Desc:        "Check lead's inbox for teammate messages (destructive read).",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{}),
+		},
+		handler: runCheckInbox,
+	})
+
+	// s16 新增：Lead 端的 3 个协议工具。
+	tools = append(tools, tool{
+		info: &schema.ToolInfo{
+			Name: "request_shutdown",
+			Desc: "Request a teammate to shut down gracefully (returns request_id for tracking).",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"teammate": {Type: schema.String, Desc: "Teammate name.", Required: true},
+			}),
+		},
+		handler: runRequestShutdown,
+	})
+	tools = append(tools, tool{
+		info: &schema.ToolInfo{
+			Name: "request_plan",
+			Desc: "Ask a teammate to submit a plan for a task.",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"teammate": {Type: schema.String, Desc: "Teammate name.", Required: true},
+				"task":     {Type: schema.String, Desc: "Task description.", Required: true},
+			}),
+		},
+		handler: runRequestPlan,
+	})
+	tools = append(tools, tool{
+		info: &schema.ToolInfo{
+			Name: "review_plan",
+			Desc: "Approve or reject a submitted plan by request_id.",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"request_id": {Type: schema.String, Desc: "Plan request ID.", Required: true},
+				"approve":    {Type: schema.Boolean, Desc: "true=approve, false=reject.", Required: true},
+				"feedback":   {Type: schema.String, Desc: "Optional feedback message."},
+			}),
+		},
+		handler: runReviewPlan,
+	})
+}
+
+// subAgentTools 是子 agent 可用的工具白名单：只有文件/bash 工具，
+// 不含 todo_write，更关键的是不含 task —— 防止子 agent 递归再开子 agent。
+var subAgentTools = map[string]bool{
+	"bash": true, "read_file": true, "write_file": true, "edit_file": true, "glob": true,
+}
+
+// toolInfos 收集所有工具定义，绑定到（父）模型。
+func toolInfos() []*schema.ToolInfo {
+	infos := make([]*schema.ToolInfo, len(tools))
+	for i, t := range tools {
+		infos[i] = t.info
+	}
+	return infos
+}
+
+// handlers 是按工具名分发的查表映射，替代 s01 中硬编码的 runBash 调用。
+func handlers() map[string]toolHandler {
+	m := make(map[string]toolHandler, len(tools))
+	for _, t := range tools {
+		m[t.info.Name] = t.handler
+	}
+	return m
+}
+
+// subToolInfos / subHandlers 是子 agent 的工具集（白名单过滤）。
+func subToolInfos() []*schema.ToolInfo {
+	var infos []*schema.ToolInfo
+	for _, t := range tools {
+		if subAgentTools[t.info.Name] {
+			infos = append(infos, t.info)
+		}
+	}
+	return infos
+}
+
+func subHandlers() map[string]toolHandler {
+	m := map[string]toolHandler{}
+	for _, t := range tools {
+		if subAgentTools[t.info.Name] {
+			m[t.info.Name] = t.handler
+		}
+	}
+	return m
+}
+
+// safePath 把路径解析为绝对路径，并确保它没有逃出工作区。
+// 注意：绝对路径要原样保留再校验——不能与 workdir 拼接，否则像 "/tmp/x"
+// 这样的工作区外路径会被 filepath.Join 当相对片段悄悄塞进 workdir/tmp/x。
+func safePath(p string) (string, error) {
+	joined := p
+	if !filepath.IsAbs(p) {
+		joined = filepath.Join(workdir, p)
+	}
+	abs, err := filepath.Abs(joined)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(workdir, abs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path escapes workspace: %s", p)
+	}
+	return abs, nil
+}
+
+// ── 工具实现 ──────────────────────────────────────────────
+
+func runBash(ctx context.Context, args string) string {
+	var a struct {
+		Command string `json:"command"`
+	}
+	_ = json.Unmarshal([]byte(args), &a)
+
+	// 危险命令的拦截已上移到权限管线（permission.go 的 Gate 1）。
+	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "bash", "-c", a.Command)
+	cmd.Dir = workdir
+	out, _ := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return "Error: Timeout (120s)"
+	}
+
+	s := strings.TrimSpace(string(out))
+	if s == "" {
+		return "(no output)"
+	}
+	return truncate(s, 50000)
+}
+
+func runRead(ctx context.Context, args string) string {
+	var a struct {
+		Path  string `json:"path"`
+		Limit int    `json:"limit"`
+	}
+	_ = json.Unmarshal([]byte(args), &a)
+
+	p, err := safePath(a.Path)
+	if err != nil {
+		return "Error: " + err.Error()
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return "Error: " + err.Error()
+	}
+
+	lines := strings.Split(string(data), "\n")
+	if a.Limit > 0 && a.Limit < len(lines) {
+		omitted := len(lines) - a.Limit
+		lines = append(lines[:a.Limit:a.Limit], fmt.Sprintf("... (%d more lines)", omitted))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func runWrite(ctx context.Context, args string) string {
+	var a struct {
+		Path    string `json:"path"`
+		Content string `json:"content"`
+	}
+	_ = json.Unmarshal([]byte(args), &a)
+
+	p, err := safePath(a.Path)
+	if err != nil {
+		return "Error: " + err.Error()
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return "Error: " + err.Error()
+	}
+	if err := os.WriteFile(p, []byte(a.Content), 0o644); err != nil {
+		return "Error: " + err.Error()
+	}
+	return fmt.Sprintf("Wrote %d bytes to %s", len(a.Content), a.Path)
+}
+
+func runEdit(ctx context.Context, args string) string {
+	var a struct {
+		Path    string `json:"path"`
+		OldText string `json:"old_text"`
+		NewText string `json:"new_text"`
+	}
+	_ = json.Unmarshal([]byte(args), &a)
+
+	p, err := safePath(a.Path)
+	if err != nil {
+		return "Error: " + err.Error()
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return "Error: " + err.Error()
+	}
+	text := string(data)
+	if !strings.Contains(text, a.OldText) {
+		return fmt.Sprintf("Error: text not found in %s", a.Path)
+	}
+	if err := os.WriteFile(p, []byte(strings.Replace(text, a.OldText, a.NewText, 1)), 0o644); err != nil {
+		return "Error: " + err.Error()
+	}
+	return "Edited " + a.Path
+}
+
+func runGlob(ctx context.Context, args string) string {
+	var a struct {
+		Pattern string `json:"pattern"`
+	}
+	_ = json.Unmarshal([]byte(args), &a)
+
+	pat := a.Pattern
+	if !filepath.IsAbs(pat) {
+		pat = filepath.Join(workdir, pat)
+	}
+	matches, err := filepath.Glob(pat)
+	if err != nil {
+		return "Error: " + err.Error()
+	}
+
+	var results []string
+	for _, m := range matches {
+		rel, err := filepath.Rel(workdir, m)
+		if err != nil || strings.HasPrefix(rel, "..") {
+			continue
+		}
+		results = append(results, rel)
+	}
+	if len(results) == 0 {
+		return "(no matches)"
+	}
+	return strings.Join(results, "\n")
+}
+
+// truncate 按 rune 截断，避免切坏多字节字符（如中文）。
+func truncate(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max])
+}
+
+// ── s05: todo_write —— 只规划，不执行 ────────────────────────
+
+type todoItem struct {
+	Content string `json:"content"`
+	Status  string `json:"status"`
+}
+
+// currentTodos 是会话内的任务清单（内存态），每次 todo_write 整体替换。
+var currentTodos []todoItem
+
+func runTodoWrite(ctx context.Context, args string) string {
+	var a struct {
+		Todos []todoItem `json:"todos"`
+	}
+	if err := json.Unmarshal([]byte(args), &a); err != nil {
+		return "Error: " + err.Error()
+	}
+
+	for i, t := range a.Todos {
+		if t.Content == "" || t.Status == "" {
+			return fmt.Sprintf("Error: todos[%d] missing 'content' or 'status'", i)
+		}
+		if t.Status != "pending" && t.Status != "in_progress" && t.Status != "completed" {
+			return fmt.Sprintf("Error: todos[%d] has invalid status '%s'", i, t.Status)
+		}
+	}
+
+	currentTodos = a.Todos
+	fmt.Println("\n\033[33m## Current Tasks\033[0m")
+	for _, t := range currentTodos {
+		var icon string
+		switch t.Status {
+		case "in_progress":
+			icon = "\033[36m▸\033[0m"
+		case "completed":
+			icon = "\033[32m✓\033[0m"
+		default:
+			icon = " "
+		}
+		fmt.Printf("  [%s] %s\n", icon, t.Content)
+	}
+	return fmt.Sprintf("Updated %d tasks", len(currentTodos))
+}
