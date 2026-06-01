@@ -6,3 +6,4 @@
 .tasks/
 .scheduled_tasks.json
 .mailboxes/
+.worktrees/
