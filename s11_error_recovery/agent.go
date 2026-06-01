@@ -56,6 +56,8 @@ func agentLoop(ctx context.Context, agent model.ToolCallingChatModel, messages [
 			fmt.Println("[auto compact]")
 			messages = compactHistory(ctx, messages)
 		}
+		// 出栏前最后一道：保证 tool_call/tool_output 配对完整。
+		messages = enforcePairing(messages)
 
 		// s11: 把 Generate 包进错误恢复。generateWithRetry 处理 429/529 退避与
 		// fallback 模型；返回的错误交给下面的恢复路径。

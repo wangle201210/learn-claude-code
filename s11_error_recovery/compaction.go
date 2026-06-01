@@ -44,6 +44,78 @@ func estimateSize(messages []*schema.Message) int {
 	return n
 }
 
+type messageSpan struct {
+	start int
+	end   int
+}
+
+// messageSpans 把消息切成“不可拆段”：
+// 1. 普通消息单独成段；
+// 2. assistant(tool_calls) + 紧随其后的 tool 结果视为一个原子段。
+func messageSpans(messages []*schema.Message) []messageSpan {
+	spans := make([]messageSpan, 0, len(messages))
+	for i := 0; i < len(messages); {
+		end := i + 1
+		if messages[i].Role == schema.Assistant && len(messages[i].ToolCalls) > 0 {
+			for end < len(messages) && messages[end].Role == schema.Tool {
+				end++
+			}
+		}
+		spans = append(spans, messageSpan{start: i, end: end})
+		i = end
+	}
+	return spans
+}
+
+func snipWindow(messages []*schema.Message, keepHeadMessages, keepTailMessages int) (int, int, bool) {
+	spans := messageSpans(messages)
+	if len(spans) == 0 {
+		return 0, 0, false
+	}
+
+	headSpanEnd := 0
+	headCount := 0
+	for headSpanEnd < len(spans) && headCount < keepHeadMessages {
+		headCount += spans[headSpanEnd].end - spans[headSpanEnd].start
+		headSpanEnd++
+	}
+
+	tailSpanStart := len(spans)
+	tailCount := 0
+	for tailSpanStart > headSpanEnd && tailCount < keepTailMessages {
+		tailSpanStart--
+		tailCount += spans[tailSpanStart].end - spans[tailSpanStart].start
+	}
+
+	if headSpanEnd >= tailSpanStart {
+		return 0, 0, false
+	}
+	return spans[headSpanEnd-1].end, spans[tailSpanStart].start, true
+}
+
+func safeTail(messages []*schema.Message, keepMessages int) []*schema.Message {
+	if len(messages) == 0 || keepMessages <= 0 {
+		return nil
+	}
+
+	spans := messageSpans(messages)
+	startSpan := len(spans)
+	count := 0
+	for startSpan > 0 && count < keepMessages {
+		startSpan--
+		count += spans[startSpan].end - spans[startSpan].start
+	}
+
+	start := spans[startSpan].start
+	if len(messages) > 0 && messages[0].Role == schema.System && start == 0 {
+		if len(spans) == 1 {
+			return nil
+		}
+		start = spans[1].start
+	}
+	return messages[start:]
+}
+
 // ── L1 snipCompact：消息过多时裁掉中间，保留头尾 ────────────────
 func snipCompact(messages []*schema.Message) []*schema.Message {
 	const maxMessages = 50
@@ -51,12 +123,16 @@ func snipCompact(messages []*schema.Message) []*schema.Message {
 		return messages
 	}
 	keepHead, keepTail := 3, maxMessages-3
-	snipped := len(messages) - keepHead - keepTail
+	headEnd, tailStart, ok := snipWindow(messages, keepHead, keepTail)
+	if !ok {
+		return messages
+	}
+	snipped := tailStart - headEnd
 
 	out := make([]*schema.Message, 0, maxMessages+1)
-	out = append(out, messages[:keepHead]...)
+	out = append(out, messages[:headEnd]...)
 	out = append(out, schema.UserMessage(fmt.Sprintf("[snipped %d messages]", snipped)))
-	out = append(out, messages[len(messages)-keepTail:]...)
+	out = append(out, messages[tailStart:]...)
 	return out
 }
 
@@ -191,12 +267,7 @@ func reactiveCompact(ctx context.Context, messages []*schema.Message) []*schema.
 
 	out := keepSystem(messages)
 	out = append(out, schema.UserMessage("[Reactive compact]\n\n"+summary))
-
-	tail := 5
-	if len(messages) < tail {
-		tail = len(messages)
-	}
-	out = append(out, messages[len(messages)-tail:]...)
+	out = append(out, safeTail(messages, 5)...)
 	return out
 }
 
@@ -206,4 +277,53 @@ func isPromptTooLong(err error) bool {
 		strings.Contains(s, "too many tokens") ||
 		strings.Contains(s, "context length") ||
 		strings.Contains(s, "maximum context")
+}
+
+// enforcePairing 是 LLM 调用前的最后一道保险：扫描 messages，让每个
+// assistant tool_call 都有对应的 Tool 输出、每条 Tool 都有前面的
+// assistant 调用。无论 snipCompact / compactHistory / reactiveCompact
+// 如何裁剪，出栏的 messages 里 tool_call 与 tool_output 永远成对——
+// 避免 OpenAI 报 "No tool output found for function call ..."。
+func enforcePairing(messages []*schema.Message) []*schema.Message {
+	// 第一步：收集所有 Tool 输出的 ToolCallID。
+	outputs := make(map[string]bool, len(messages))
+	for _, m := range messages {
+		if m.Role == schema.Tool && m.ToolCallID != "" {
+			outputs[m.ToolCallID] = true
+		}
+	}
+
+	// 第二步：过滤 assistant 的 ToolCalls（只保留有 output 的），
+	// 记下被保留的 ToolCallID；assistant 既无文字也无保留 tool_call → 整条删除。
+	keptCalls := make(map[string]bool, len(messages))
+	out := make([]*schema.Message, 0, len(messages))
+	for _, m := range messages {
+		if m.Role == schema.Assistant && len(m.ToolCalls) > 0 {
+			keep := make([]schema.ToolCall, 0, len(m.ToolCalls))
+			for _, tc := range m.ToolCalls {
+				if outputs[tc.ID] {
+					keep = append(keep, tc)
+					keptCalls[tc.ID] = true
+				}
+			}
+			if len(keep) == 0 && strings.TrimSpace(m.Content) == "" {
+				continue
+			}
+			copied := *m
+			copied.ToolCalls = keep
+			out = append(out, &copied)
+			continue
+		}
+		out = append(out, m)
+	}
+
+	// 第三步：删除孤立 Tool（其对应的 call 已被过滤掉）。
+	final := make([]*schema.Message, 0, len(out))
+	for _, m := range out {
+		if m.Role == schema.Tool && !keptCalls[m.ToolCallID] {
+			continue
+		}
+		final = append(final, m)
+	}
+	return final
 }
