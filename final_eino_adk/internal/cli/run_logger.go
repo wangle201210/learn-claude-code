@@ -23,7 +23,7 @@ func (l *RunLogger) Log(message string) {
 	fmt.Printf("\n\033[90m[%s] %s\033[0m\n", time.Now().Format("15:04:05"), message)
 }
 
-func (l *RunLogger) HandleEvent(event *adk.AgentEvent) error {
+func (l *RunLogger) HandleEvent(event *adk.AgentEvent) (adk.Message, error) {
 	if event.AgentName != "" && event.AgentName != l.lastAgent {
 		l.lastAgent = event.AgentName
 		l.Log("进入 agent: " + event.AgentName)
@@ -31,14 +31,14 @@ func (l *RunLogger) HandleEvent(event *adk.AgentEvent) error {
 	l.logAction(event.Action)
 
 	if event.Output == nil || event.Output.MessageOutput == nil {
-		return nil
+		return nil, nil
 	}
 	msg, err := event.Output.MessageOutput.GetMessage()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if msg == nil {
-		return nil
+		return nil, nil
 	}
 
 	switch msg.Role {
@@ -56,7 +56,7 @@ func (l *RunLogger) HandleEvent(event *adk.AgentEvent) error {
 		}
 		l.logToolDone(toolName, msg.ToolCallID, msg.Content)
 	}
-	return nil
+	return msg, nil
 }
 
 func (l *RunLogger) logAction(action *adk.AgentAction) {

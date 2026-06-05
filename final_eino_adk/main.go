@@ -61,6 +61,7 @@ func main() {
 	fmt.Println("输入问题回车发送；q 或 exit 退出。")
 	fmt.Println()
 
+	history := &conversationHistory{}
 	for {
 		fmt.Print("\033[36m>> \033[0m")
 		line, err := stdin.ReadString('\n')
@@ -79,11 +80,13 @@ func main() {
 			query = strings.Join(notifications, "\n\n") + "\n\n" + query
 		}
 
+		input, userMessage := history.nextInput(query)
 		logger := cli.NewRunLogger()
 		logger.Log("开始处理请求")
 
-		// runner.Query 内部把字符串包成 user message 再调 Run；返回流式事件迭代器。
-		iter := runner.Query(ctx, query)
+		// Runner.Query 每次都会新建 ADK run session；这里显式传入历史，保证多轮上下文连续。
+		iter := runner.Run(ctx, input)
+		roundMessages := []adk.Message{userMessage}
 		for {
 			event, ok := iter.Next()
 			if !ok {
@@ -94,11 +97,16 @@ func main() {
 				fmt.Printf("\033[31m%v\033[0m\n", event.Err)
 				break
 			}
-			if err := logger.HandleEvent(event); err != nil {
+			msg, err := logger.HandleEvent(event)
+			if err != nil {
 				fmt.Printf("\033[31m%v\033[0m\n", err)
 				break
 			}
+			if msg != nil {
+				roundMessages = append(roundMessages, msg)
+			}
 		}
+		history.commit(roundMessages)
 		fmt.Println()
 	}
 }
