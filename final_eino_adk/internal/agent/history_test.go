@@ -114,6 +114,56 @@ func TestHistoryRecorderFiltersAgentsMDContext(t *testing.T) {
 	}
 }
 
+func TestHistoryRecorderFiltersHookContext(t *testing.T) {
+	var recorded []adk.Message
+	mw := newHistoryRecorderMiddleware(func(messages []adk.Message) {
+		recorded = messages
+	})
+
+	_, err := mw.AfterAgent(context.Background(), &adk.ChatModelAgentState{
+		Messages: []adk.Message{
+			schema.UserMessage("keep"),
+			hookContextMessage("drop"),
+			schema.AssistantMessage("answer", nil),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(recorded) != 2 {
+		t.Fatalf("recorded %d messages, want 2", len(recorded))
+	}
+	if recorded[0].Content != "keep" || recorded[1].Content != "answer" {
+		t.Fatalf("recorded messages = %#v", recorded)
+	}
+}
+
+func TestHistoryRecorderFiltersToolSearchReminder(t *testing.T) {
+	var recorded []adk.Message
+	mw := newHistoryRecorderMiddleware(func(messages []adk.Message) {
+		recorded = messages
+	})
+
+	_, err := mw.AfterAgent(context.Background(), &adk.ChatModelAgentState{
+		Messages: []adk.Message{
+			schema.UserMessage("keep"),
+			toolSearchReminderMessage("<available-deferred-tools>\nmcp__docs__search\n</available-deferred-tools>"),
+			schema.AssistantMessage("answer", nil),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(recorded) != 2 {
+		t.Fatalf("recorded %d messages, want 2", len(recorded))
+	}
+	if recorded[0].Content != "keep" || recorded[1].Content != "answer" {
+		t.Fatalf("recorded messages = %#v", recorded)
+	}
+}
+
 func TestHistoryRecorderFiltersSystemMessages(t *testing.T) {
 	var recorded []adk.Message
 	mw := newHistoryRecorderMiddleware(func(messages []adk.Message) {
@@ -173,6 +223,18 @@ func memoryContextMessage(content string) adk.Message {
 func agentsMDContextMessage(content string) adk.Message {
 	msg := schema.UserMessage(content)
 	msg.Extra = map[string]any{agentsMDExtraKey: true}
+	return msg
+}
+
+func hookContextMessage(content string) adk.Message {
+	msg := schema.UserMessage(content)
+	msg.Extra = map[string]any{hookContextExtraKey: true}
+	return msg
+}
+
+func toolSearchReminderMessage(content string) adk.Message {
+	msg := schema.UserMessage(content)
+	msg.Extra = map[string]any{toolSearchExtraKey: true}
 	return msg
 }
 

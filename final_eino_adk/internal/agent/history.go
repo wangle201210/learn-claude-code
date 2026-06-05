@@ -7,6 +7,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
+	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/recovery"
 )
 
 type HistoryRecorder func([]adk.Message)
@@ -14,6 +15,8 @@ type HistoryRecorder func([]adk.Message)
 const (
 	compactControlExtraKey = "final_eino_compact_control"
 	agentsMDExtraKey       = "__agentsmd_content__"
+	hookContextExtraKey    = "final_eino_hook_context"
+	toolSearchExtraKey     = "__toolsearch_reminder__"
 )
 
 type CompactController struct {
@@ -125,7 +128,16 @@ func copyHistoryMessages(messages []adk.Message) []adk.Message {
 		if hasMessageExtra(msg, agentsMDExtraKey) {
 			continue
 		}
+		if hasMessageExtra(msg, hookContextExtraKey) {
+			continue
+		}
+		if hasMessageExtra(msg, toolSearchExtraKey) {
+			continue
+		}
 		if hasMessageExtra(msg, "final_eino_memory_context") {
+			continue
+		}
+		if recovery.IsControlMessage(msg) {
 			continue
 		}
 		if hasMessageExtra(msg, compactControlExtraKey) {
@@ -139,6 +151,17 @@ func copyHistoryMessages(messages []adk.Message) []adk.Message {
 			}
 		}
 		out = append(out, cloneMessage(msg))
+	}
+	return out
+}
+
+func cloneMessages(messages []adk.Message) []adk.Message {
+	if len(messages) == 0 {
+		return nil
+	}
+	out := make([]adk.Message, len(messages))
+	for i, msg := range messages {
+		out[i] = cloneMessage(msg)
 	}
 	return out
 }

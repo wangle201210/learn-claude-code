@@ -25,7 +25,7 @@ func buildAgentTools(ctx context.Context, primary model.ToolCallingChatModel, wo
 	taskAgent, err := buildDelegateAgent(ctx, "task_subagent",
 		"Run an isolated coding/research subtask with workspace tools and return the result.",
 		"You are a focused subagent. Complete the delegated task using available workspace tools. Return concise findings, changed files, and any remaining risks. Do not delegate further.",
-		primary, workspaceBackend, prompt)
+		primary, nil, workspaceBackend, prompt)
 	if err != nil {
 		return nil, err
 	}
@@ -37,7 +37,7 @@ func buildAgentTools(ctx context.Context, primary model.ToolCallingChatModel, wo
 	teammateAgent, err := buildDelegateAgent(ctx, "teammate",
 		"Ask a teammate agent to review, research, or implement a bounded piece of work.",
 		"You are a teammate agent. Use the chat history and workspace tools to help with the requested role. Be direct: report conclusions, evidence, and concrete next steps. Do not delegate further.",
-		primary, workspaceBackend, prompt)
+		primary, nil, workspaceBackend, prompt)
 	if err != nil {
 		return nil, err
 	}
@@ -49,7 +49,7 @@ func buildAgentTools(ctx context.Context, primary model.ToolCallingChatModel, wo
 	return []tool.BaseTool{taskTool, teammateTool}, nil
 }
 
-func buildDelegateAgent(ctx context.Context, name, desc, instruction string, primary model.ToolCallingChatModel, workspaceBackend *workspace.Backend, prompt permission.PromptFunc) (*adk.ChatModelAgent, error) {
+func buildDelegateAgent(ctx context.Context, name, desc, instruction string, primary model.ToolCallingChatModel, modelOverride model.BaseChatModel, workspaceBackend *workspace.Backend, prompt permission.PromptFunc) (*adk.ChatModelAgent, error) {
 	patchMW, err := patchtoolcalls.New(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -72,16 +72,25 @@ func buildDelegateAgent(ctx context.Context, name, desc, instruction string, pri
 	if err != nil {
 		return nil, err
 	}
+	permissionMW, err := permission.NewFromRoot(workspace.Dir(), prompt)
+	if err != nil {
+		return nil, err
+	}
+
+	agentModel := model.BaseChatModel(primary)
+	if modelOverride != nil {
+		agentModel = modelOverride
+	}
 
 	return adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name:          name,
 		Description:   desc,
 		Instruction:   instruction,
-		Model:         primary,
+		Model:         agentModel,
 		MaxIterations: 12,
 		Handlers: []adk.ChatModelAgentMiddleware{
 			patchMW,
-			permission.New(prompt),
+			permissionMW,
 			reductionMW,
 			filesystemMW,
 		},

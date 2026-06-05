@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"strings"
-	"unicode"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
@@ -13,8 +12,9 @@ import (
 type modelRouteTier string
 
 const (
-	modelRouteSimple  modelRouteTier = "simple"
-	modelRouteComplex modelRouteTier = "complex"
+	modelRouteSimple   modelRouteTier = "simple"
+	modelRouteStandard modelRouteTier = "standard"
+	modelRouteComplex  modelRouteTier = "complex"
 )
 
 type modelRouteDecision struct {
@@ -23,10 +23,11 @@ type modelRouteDecision struct {
 }
 
 type modelRouterConfig struct {
-	defaultModel string
-	simpleModel  string
-	complexModel string
-	disabled     bool
+	defaultModel  string
+	simpleModel   string
+	standardModel string
+	complexModel  string
+	disabled      bool
 }
 
 type routedModel struct {
@@ -48,10 +49,18 @@ func modelRouterConfigFromEnv() modelRouterConfig {
 			"FINAL_EINO_SIMPLE_MODEL",
 			"OPENAI_SIMPLE_MODEL",
 			"ANTHROPIC_SMALL_FAST_MODEL",
+			"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+		),
+		standardModel: firstNonEmptyEnv(
+			"FINAL_EINO_STANDARD_MODEL",
+			"OPENAI_STANDARD_MODEL",
+			"ANTHROPIC_DEFAULT_SONNET_MODEL",
+			"OPENAI_MODEL",
 		),
 		complexModel: firstNonEmptyEnv(
 			"FINAL_EINO_COMPLEX_MODEL",
 			"OPENAI_COMPLEX_MODEL",
+			"ANTHROPIC_DEFAULT_OPUS_MODEL",
 			"OPENAI_MODEL",
 		),
 		disabled: isEnvFalse(os.Getenv("FINAL_EINO_MODEL_ROUTING")),
@@ -63,19 +72,68 @@ func modelRoutingSummaryFromEnv() string {
 	if !cfg.enabled() {
 		return ""
 	}
-	return "model route 已启用：simple=" + cfg.simpleModel + "，complex=" + cfg.complexModel
+	return "model route 已启用：simple=" + cfg.modelForTier(modelRouteSimple) +
+		"，standard=" + cfg.modelForTier(modelRouteStandard) +
+		"，complex=" + cfg.modelForTier(modelRouteComplex)
 }
 
 func (c modelRouterConfig) enabled() bool {
-	return !c.disabled && c.simpleModel != "" && c.complexModel != "" && c.simpleModel != c.complexModel
+	if c.disabled {
+		return false
+	}
+	for _, selected := range []string{
+		c.modelForTier(modelRouteSimple),
+		c.modelForTier(modelRouteStandard),
+		c.modelForTier(modelRouteComplex),
+	} {
+		if selected != "" && selected != c.defaultModel {
+			return true
+		}
+	}
+	return false
+}
+
+func (c modelRouterConfig) modelForTier(tier modelRouteTier) string {
+	switch tier {
+	case modelRouteSimple:
+		if c.simpleModel != "" {
+			return c.simpleModel
+		}
+		return c.modelForTier(modelRouteStandard)
+	case modelRouteStandard:
+		if c.standardModel != "" {
+			return c.standardModel
+		}
+		return c.defaultModel
+	case modelRouteComplex:
+		if c.complexModel != "" {
+			return c.complexModel
+		}
+		return c.modelForTier(modelRouteStandard)
+	default:
+		return c.defaultModel
+	}
 }
 
 func (m *routedModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-	return m.base.Generate(ctx, input, m.routeOptions(input, opts...)...)
+	route := m.route(ctx, input, opts...)
+	msg, err := m.base.Generate(ctx, input, route.opts...)
+	if err == nil {
+		route.recordUsage(msg)
+	}
+	return msg, err
 }
 
 func (m *routedModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	return m.base.Stream(ctx, input, m.routeOptions(input, opts...)...)
+	route := m.route(ctx, input, opts...)
+	reader, err := m.base.Stream(ctx, input, route.opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderWithConvert(reader, func(msg *schema.Message) (*schema.Message, error) {
+		route.recordUsage(msg)
+		return msg, nil
+	}), nil
 }
 
 func (m *routedModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
@@ -86,159 +144,37 @@ func (m *routedModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChat
 	return newRoutedModel(withTools, m.cfg), nil
 }
 
-func (m *routedModel) routeOptions(input []*schema.Message, opts ...model.Option) []model.Option {
+type modelRouteCall struct {
+	usage  *modelRouteUsageCollector
+	callID int
+	opts   []model.Option
+}
+
+func (c modelRouteCall) recordUsage(msg *schema.Message) {
+	if c.usage == nil || msg == nil || msg.ResponseMeta == nil || msg.ResponseMeta.Usage == nil {
+		return
+	}
+	c.usage.addUsage(c.callID, msg.ResponseMeta.Usage)
+}
+
+func (m *routedModel) route(ctx context.Context, input []*schema.Message, opts ...model.Option) modelRouteCall {
 	if !m.cfg.enabled() {
-		return opts
+		return modelRouteCall{opts: opts}
 	}
 	if model.GetCommonOptions(nil, opts...).Model != nil {
-		return opts
+		return modelRouteCall{opts: opts}
 	}
 
-	selected := m.cfg.complexModel
-	if classifyModelRoute(input).tier == modelRouteSimple {
-		selected = m.cfg.simpleModel
-	}
+	decision := classifyModelRoute(input)
+	selected := m.cfg.modelForTier(decision.tier)
+	collector, callID := recordModelRoute(ctx, decision.tier, selected)
 	if selected == "" || selected == m.cfg.defaultModel {
-		return opts
+		return modelRouteCall{usage: collector, callID: callID, opts: opts}
 	}
 	out := make([]model.Option, 0, len(opts)+1)
 	out = append(out, opts...)
 	out = append(out, model.WithModel(selected))
-	return out
-}
-
-func classifyModelRoute(messages []*schema.Message) modelRouteDecision {
-	stats := collectRouteStats(messages)
-	if stats.hasToolTraffic {
-		return modelRouteDecision{tier: modelRouteComplex, reason: "tool traffic"}
-	}
-	if stats.totalChars > 8000 || stats.messageCount > 16 {
-		return modelRouteDecision{tier: modelRouteComplex, reason: "large context"}
-	}
-	if isComplexPrompt(stats.latestUser) {
-		return modelRouteDecision{tier: modelRouteComplex, reason: "complex prompt"}
-	}
-	return modelRouteDecision{tier: modelRouteSimple, reason: "short prompt"}
-}
-
-type routeStats struct {
-	latestUser     string
-	totalChars     int
-	messageCount   int
-	hasToolTraffic bool
-}
-
-func collectRouteStats(messages []*schema.Message) routeStats {
-	var stats routeStats
-	for _, msg := range messages {
-		if msg == nil {
-			continue
-		}
-		stats.messageCount++
-		stats.totalChars += len(msg.Content)
-		if msg.Role == schema.Tool || len(msg.ToolCalls) > 0 {
-			stats.hasToolTraffic = true
-		}
-		if msg.Role == schema.User && !isTransientContextMessage(msg) {
-			content := strings.TrimSpace(msg.Content)
-			if content != "" {
-				stats.latestUser = content
-			}
-		}
-	}
-	return stats
-}
-
-func isTransientContextMessage(msg *schema.Message) bool {
-	if msg == nil || msg.Extra == nil {
-		return false
-	}
-	if _, ok := msg.Extra["final_eino_memory_context"]; ok {
-		return true
-	}
-	if _, ok := msg.Extra["__agentsmd_content__"]; ok {
-		return true
-	}
-	return false
-}
-
-func isComplexPrompt(prompt string) bool {
-	text := strings.ToLower(strings.TrimSpace(prompt))
-	if text == "" {
-		return false
-	}
-	if len([]rune(text)) > 500 {
-		return true
-	}
-	for _, marker := range []string{"```", "panic:", "traceback", "exception", "node runerror", "error:", "failed"} {
-		if strings.Contains(text, marker) {
-			return true
-		}
-	}
-	for _, keyword := range complexPromptKeywords {
-		if strings.Contains(text, keyword) {
-			return true
-		}
-	}
-	if looksLikeCodeOrPath(text) {
-		return true
-	}
-	return false
-}
-
-var complexPromptKeywords = []string{
-	"implement",
-	"refactor",
-	"debug",
-	"fix",
-	"failing",
-	"failure",
-	"test",
-	"permission",
-	"memory",
-	"compact",
-	"summarize",
-	"summary",
-	"context",
-	"mcp",
-	"worktree",
-	"push",
-	"commit",
-	"修改",
-	"实现",
-	"补充",
-	"完善",
-	"修复",
-	"调试",
-	"报错",
-	"异常",
-	"测试",
-	"重构",
-	"权限",
-	"记忆",
-	"上下文",
-	"压缩",
-	"总结",
-	"摘要",
-	"执行",
-	"提交",
-	"推送",
-	"代码",
-	"文件",
-}
-
-func looksLikeCodeOrPath(text string) bool {
-	for _, marker := range []string{".go", ".ts", ".tsx", ".js", ".jsx", ".py", ".md", ".json", "go test", "go run", "npm ", "pnpm ", "git "} {
-		if strings.Contains(text, marker) {
-			return true
-		}
-	}
-	for _, r := range text {
-		if unicode.IsControl(r) && r != '\n' && r != '\t' {
-			return true
-		}
-	}
-	return strings.Count(text, "/") >= 2
+	return modelRouteCall{usage: collector, callID: callID, opts: out}
 }
 
 func firstNonEmptyEnv(keys ...string) string {

@@ -2,15 +2,18 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 	agentapp "github.com/wangle201210/learn-claude-code/final_eino_adk/internal/agent"
+	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/recovery"
 )
 
 func TestFinalAgentCarriesHistoryWithoutDuplicatingSystemMessages(t *testing.T) {
@@ -55,7 +58,7 @@ func TestFinalAgentCarriesHistoryWithoutDuplicatingSystemMessages(t *testing.T) 
 		roleContent{role: schema.User, content: "second"},
 		roleContent{role: schema.Assistant, content: "agent reply 2"},
 	)
-	assertToolsInclude(t, fake.agentTools(), "compact", "task", "teammate", "background_execute", "create_worktree")
+	assertToolsInclude(t, fake.agentTools(), "compact", "task", "teammate", "write_todos", "background_execute", "spawn_teammate", "create_worktree")
 }
 
 func TestFinalAgentManualCompactRunsOfficialSummarization(t *testing.T) {
@@ -68,7 +71,7 @@ func TestFinalAgentManualCompactRunsOfficialSummarization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent})
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent, EnableStreaming: true})
 
 	runUserTurn(t, ctx, runner, history, "first")
 	runManualCompactTurn(t, ctx, runner, history, compactController)
@@ -93,6 +96,257 @@ func TestFinalAgentManualCompactRunsOfficialSummarization(t *testing.T) {
 	}
 }
 
+func TestFinalAgentReactiveCompactOnPromptTooLong(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	fake := newFinalTestModel()
+	fake.enqueueErrors(errors.New("context_length_exceeded: too many tokens"))
+	history := &conversationHistory{}
+	compactController := agentapp.NewCompactController()
+	agent, _, err := agentapp.Build(ctx, fake, nil, denyPrompt, history.replace, compactController)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent})
+
+	history.beginRound()
+	input, userMessage := history.nextInput("please continue")
+	result := runAgentWithRecovery(ctx, runner, history, compactController, input, userMessage, "test")
+
+	if result.Err != nil {
+		t.Fatalf("run err = %v, want recovered", result.Err)
+	}
+	if fake.summaryCalls() != 1 {
+		t.Fatalf("summary calls = %d, want 1", fake.summaryCalls())
+	}
+	inputs := fake.agentInputs()
+	if len(inputs) != 2 {
+		t.Fatalf("agent model calls = %d, want original failed call + compact retry", len(inputs))
+	}
+	assertRoleContents(t, inputs[1],
+		roleContent{role: schema.System},
+		roleContent{role: schema.User, contains: "summary: first"},
+	)
+	stored := history.copyMessages()
+	assertRoleContents(t, stored,
+		roleContent{role: schema.User, contains: "summary: first"},
+		roleContent{role: schema.Assistant, content: "agent reply 2"},
+	)
+}
+
+func TestFinalAgentContinuesAfterMaxTokensWithOfficialRetry(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	fake := newFinalTestModel()
+	fake.enqueueResponses(truncatedResponse("partial answer"))
+	history := &conversationHistory{}
+	compactController := agentapp.NewCompactController()
+	agent, _, err := agentapp.Build(ctx, fake, nil, denyPrompt, history.replace, compactController)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent})
+
+	runUserTurn(t, ctx, runner, history, "long answer please")
+
+	inputs := fake.agentInputs()
+	if len(inputs) != 2 {
+		t.Fatalf("agent model calls = %d, want original + continuation retry", len(inputs))
+	}
+	if !messageContentsContain(inputs[1], "partial answer") {
+		t.Fatalf("retry input missing partial assistant answer:\n%s", formatMessages(inputs[1]))
+	}
+	if !messageContentsContain(inputs[1], recovery.ContinuationPrompt) {
+		t.Fatalf("retry input missing continuation prompt:\n%s", formatMessages(inputs[1]))
+	}
+	stored := history.copyMessages()
+	if messageContentsContain(stored, recovery.ContinuationPrompt) {
+		t.Fatalf("recovery continuation prompt leaked into stored history:\n%s", formatMessages(stored))
+	}
+	if !messageContentsContain(stored, "agent reply 2") {
+		t.Fatalf("stored history missing recovered answer:\n%s", formatMessages(stored))
+	}
+}
+
+func TestFinalAgentRunsUserPromptSubmitHookAsTransientContext(t *testing.T) {
+	t.Setenv("FINAL_EINO_HOOKS", `{
+		"hooks": {
+			"UserPromptSubmit": [
+				{"hooks":[{"type":"command","command":"printf '{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"hook says inspect workspace\"}}'"}]}
+			]
+		}
+	}`)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	fake := newFinalTestModel()
+	history := &conversationHistory{}
+	compactController := agentapp.NewCompactController()
+	agent, _, err := agentapp.Build(ctx, fake, nil, denyPrompt, history.replace, compactController)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent})
+
+	runUserTurn(t, ctx, runner, history, "hello")
+
+	inputs := fake.agentInputs()
+	if len(inputs) != 1 {
+		t.Fatalf("agent model calls = %d, want 1", len(inputs))
+	}
+	if !messageContentsContain(inputs[0], "hook says inspect workspace") {
+		t.Fatalf("model input missing hook context:\n%s", formatMessages(inputs[0]))
+	}
+	if messageContentsContain(history.copyMessages(), "hook says inspect workspace") {
+		t.Fatalf("hook context leaked into stored history:\n%s", formatMessages(history.copyMessages()))
+	}
+}
+
+func TestFinalAgentSpawnTeammateProducesNotification(t *testing.T) {
+	t.Setenv("FINAL_EINO_TEAMMATE_IDLE_MS", "0")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	fake := newFinalTestModel()
+	fake.enqueueResponses(responseWithToolCall("call-spawn", "spawn_teammate", `{"name":"reviewer","role":"reviewer","prompt":"report done"}`))
+	history := &conversationHistory{}
+	compactController := agentapp.NewCompactController()
+	agent, runtimeState, err := agentapp.Build(ctx, fake, nil, denyPrompt, history.replace, compactController)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent})
+
+	runUserTurn(t, ctx, runner, history, "start teammate")
+
+	notes := waitNotifications(t, runtimeState, 3*time.Second, "teammate_result")
+	if !messageTextsContain(notes, "agent reply") {
+		t.Fatalf("teammate notification missing result text: %v", notes)
+	}
+}
+
+func TestFinalAgentRoutesModelTiersThroughRealMiddleware(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	fake := newFinalTestModel()
+	routed := newRoutedModel(fake, modelRouterConfig{
+		defaultModel:  "complex-model",
+		simpleModel:   "simple-model",
+		standardModel: "standard-model",
+		complexModel:  "complex-model",
+	})
+	history := &conversationHistory{}
+	compactController := agentapp.NewCompactController()
+	agent, _, err := agentapp.Build(ctx, routed, nil, denyPrompt, history.replace, compactController)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent})
+
+	runUserTurn(t, ctx, runner, history, "hello")
+	runUserTurn(t, ctx, runner, history, "implement a small fix in foo.go")
+	runManualCompactTurn(t, ctx, runner, history, compactController)
+
+	if fake.summaryCalls() != 1 {
+		t.Fatalf("summary calls = %d, want 1", fake.summaryCalls())
+	}
+	assertModelSequence(t, fake.modelSelections(),
+		"simple-model",
+		"standard-model",
+		"standard-model",
+		"simple-model",
+	)
+}
+
+func TestFinalAgentRoutesToolRequestedCompactWithoutConfirmation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	fake := newFinalTestModel()
+	routed := newRoutedModel(fake, modelRouterConfig{
+		defaultModel:  "complex-model",
+		simpleModel:   "simple-model",
+		standardModel: "standard-model",
+		complexModel:  "complex-model",
+	})
+	history := &conversationHistory{}
+	compactController := agentapp.NewCompactController()
+	agent, _, err := agentapp.Build(ctx, routed, nil, denyPrompt, history.replace, compactController)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent})
+
+	runUserTurn(t, ctx, runner, history, "hello")
+	runControllerCompactTurn(t, ctx, runner, history, compactController)
+
+	if fake.summaryCalls() != 1 {
+		t.Fatalf("summary calls = %d, want 1", fake.summaryCalls())
+	}
+	assertModelSequence(t, fake.modelSelections(),
+		"simple-model",
+		"standard-model",
+		"standard-model",
+	)
+}
+
+func TestFinalAgentRoutesDelegatedTaskModelCall(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	fake := newFinalTestModel()
+	fake.enqueueResponses(
+		responseWithToolCall("call-task", "task", `{"request":"implement a small fix in foo.go"}`),
+		schema.AssistantMessage("task result", nil),
+	)
+	routed := newRoutedModel(fake, modelRouterConfig{
+		defaultModel:  "complex-model",
+		simpleModel:   "simple-model",
+		standardModel: "standard-model",
+		complexModel:  "complex-model",
+	})
+	history := &conversationHistory{}
+	compactController := agentapp.NewCompactController()
+	agent, _, err := agentapp.Build(ctx, routed, nil, denyPrompt, history.replace, compactController)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent})
+
+	runUserTurn(t, ctx, runner, history, "delegate this small coding fix")
+
+	assertModelSequence(t, fake.modelSelections(),
+		"standard-model",
+		"standard-model",
+		"standard-model",
+	)
+}
+
+func TestFinalAgentRoutesAsyncMemoryExtraction(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	fake := newFinalTestModel()
+	routed := newRoutedModel(fake, modelRouterConfig{
+		defaultModel:  "complex-model",
+		simpleModel:   "simple-model",
+		standardModel: "standard-model",
+		complexModel:  "complex-model",
+	})
+	history := &conversationHistory{}
+	compactController := agentapp.NewCompactController()
+	agent, _, err := agentapp.Build(ctx, routed, nil, denyPrompt, history.replace, compactController)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent})
+
+	runUserTurn(t, ctx, runner, history, "请记住我以后希望回答更简洁")
+
+	if !fake.waitMemoryCalls(1, time.Second) {
+		t.Fatal("async memory extraction was not routed through model")
+	}
+	assertModelPrefix(t, fake.modelSelections(),
+		"simple-model",
+		"standard-model",
+	)
+}
+
 const compactConfirmationPrompt = "Context compaction is complete. Reply in one short Chinese sentence confirming the conversation history was compacted."
 
 func runUserTurn(t *testing.T, ctx context.Context, runner *adk.Runner, history *conversationHistory, query string) {
@@ -113,6 +367,17 @@ func runManualCompactTurn(t *testing.T, ctx context.Context, runner *adk.Runner,
 	runAgent(ctx, runner, history, input, nil, "test compact")
 }
 
+func runControllerCompactTurn(t *testing.T, ctx context.Context, runner *adk.Runner, history *conversationHistory, controller *agentapp.CompactController) {
+	t.Helper()
+	history.beginRound()
+	input := history.copyMessages()
+	if len(input) == 0 {
+		t.Fatal("controller compact needs existing history")
+	}
+	controller.Request()
+	runAgent(ctx, runner, history, input, nil, "test compact")
+}
+
 func denyPrompt(string) (string, bool) {
 	return "n", true
 }
@@ -124,6 +389,13 @@ type finalTestModel struct {
 	memories  int
 	inputs    [][]*schema.Message
 	tools     [][]string
+	models    []string
+	scripted  []finalTestModelScript
+}
+
+type finalTestModelScript struct {
+	message *schema.Message
+	err     error
 }
 
 func newFinalTestModel() *finalTestModel {
@@ -147,6 +419,7 @@ func (m *finalTestModel) WithTools(_ []*schema.ToolInfo) (model.ToolCallingChatM
 }
 
 func (m *finalTestModel) respond(_ context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	m.recordModel(opts...)
 	if isSummaryPrompt(input) {
 		m.mu.Lock()
 		m.summaries++
@@ -166,9 +439,33 @@ func (m *finalTestModel) respond(_ context.Context, input []*schema.Message, opt
 	m.responses++
 	m.inputs = append(m.inputs, visibleTestMessages(input))
 	m.tools = append(m.tools, toolNames(common.Tools))
+	if len(m.scripted) > 0 {
+		item := m.scripted[0]
+		m.scripted = m.scripted[1:]
+		if item.err != nil {
+			return nil, item.err
+		}
+		return cloneTestMessage(item.message), nil
+	}
 	msg := schema.AssistantMessage(fmt.Sprintf("agent reply %d", m.responses), nil)
 	msg.ResponseMeta = &schema.ResponseMeta{Usage: &schema.TokenUsage{TotalTokens: 10}}
 	return msg, nil
+}
+
+func (m *finalTestModel) enqueueResponses(messages ...*schema.Message) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, msg := range messages {
+		m.scripted = append(m.scripted, finalTestModelScript{message: cloneTestMessage(msg)})
+	}
+}
+
+func (m *finalTestModel) enqueueErrors(errs ...error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, err := range errs {
+		m.scripted = append(m.scripted, finalTestModelScript{err: err})
+	}
 }
 
 func (m *finalTestModel) agentInputs() [][]*schema.Message {
@@ -201,6 +498,34 @@ func (m *finalTestModel) memoryCalls() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.memories
+}
+
+func (m *finalTestModel) waitMemoryCalls(want int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if m.memoryCalls() >= want {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return false
+}
+
+func (m *finalTestModel) modelSelections() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.models...)
+}
+
+func (m *finalTestModel) recordModel(opts ...model.Option) {
+	common := model.GetCommonOptions(nil, opts...)
+	selected := ""
+	if common.Model != nil {
+		selected = *common.Model
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.models = append(m.models, selected)
 }
 
 func isSummaryPrompt(input []*schema.Message) bool {
@@ -242,22 +567,26 @@ func hasTestExtra(msg *schema.Message, key string) bool {
 func cloneTestMessages(messages []*schema.Message) []*schema.Message {
 	out := make([]*schema.Message, len(messages))
 	for i, msg := range messages {
-		if msg == nil {
-			continue
-		}
-		copied := *msg
-		if msg.ToolCalls != nil {
-			copied.ToolCalls = append([]schema.ToolCall(nil), msg.ToolCalls...)
-		}
-		if msg.Extra != nil {
-			copied.Extra = make(map[string]any, len(msg.Extra))
-			for k, v := range msg.Extra {
-				copied.Extra[k] = v
-			}
-		}
-		out[i] = &copied
+		out[i] = cloneTestMessage(msg)
 	}
 	return out
+}
+
+func cloneTestMessage(msg *schema.Message) *schema.Message {
+	if msg == nil {
+		return nil
+	}
+	copied := *msg
+	if msg.ToolCalls != nil {
+		copied.ToolCalls = append([]schema.ToolCall(nil), msg.ToolCalls...)
+	}
+	if msg.Extra != nil {
+		copied.Extra = make(map[string]any, len(msg.Extra))
+		for k, v := range msg.Extra {
+			copied.Extra[k] = v
+		}
+	}
+	return &copied
 }
 
 func toolNames(infos []*schema.ToolInfo) []string {
@@ -308,6 +637,37 @@ func countRole(messages []*schema.Message, role schema.RoleType) int {
 	return count
 }
 
+func messageContentsContain(messages []*schema.Message, needle string) bool {
+	for _, msg := range messages {
+		if msg != nil && strings.Contains(msg.Content, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func messageTextsContain(messages []string, needle string) bool {
+	for _, msg := range messages {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func waitNotifications(t *testing.T, runtimeState interface{ CollectNotifications() []string }, timeout time.Duration, needle string) []string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		notes := runtimeState.CollectNotifications()
+		if messageTextsContain(notes, needle) {
+			return notes
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return runtimeState.CollectNotifications()
+}
+
 func assertToolsInclude(t *testing.T, toolsPerCall [][]string, names ...string) {
 	t.Helper()
 	if len(toolsPerCall) == 0 {
@@ -324,6 +684,30 @@ func assertToolsInclude(t *testing.T, toolsPerCall [][]string, names ...string) 
 	}
 }
 
+func assertModelSequence(t *testing.T, got []string, want ...string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("model selections = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("model selections = %v, want %v", got, want)
+		}
+	}
+}
+
+func assertModelPrefix(t *testing.T, got []string, want ...string) {
+	t.Helper()
+	if len(got) < len(want) {
+		t.Fatalf("model selections = %v, want prefix %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("model selections = %v, want prefix %v", got, want)
+		}
+	}
+}
+
 func formatMessages(messages []*schema.Message) string {
 	var b strings.Builder
 	for i, msg := range messages {
@@ -334,4 +718,21 @@ func formatMessages(messages []*schema.Message) string {
 		fmt.Fprintf(&b, "%d: %s %q\n", i, msg.Role, msg.Content)
 	}
 	return b.String()
+}
+
+func responseWithToolCall(id, name, args string) *schema.Message {
+	return schema.AssistantMessage("", []schema.ToolCall{{
+		ID:   id,
+		Type: "function",
+		Function: schema.FunctionCall{
+			Name:      name,
+			Arguments: args,
+		},
+	}})
+}
+
+func truncatedResponse(content string) *schema.Message {
+	msg := schema.AssistantMessage(content, nil)
+	msg.ResponseMeta = &schema.ResponseMeta{FinishReason: "max_tokens"}
+	return msg
 }

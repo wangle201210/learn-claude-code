@@ -3,13 +3,13 @@ package agent
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/middlewares/agentsmd"
+	"github.com/cloudwego/eino/adk/middlewares/dynamictool/toolsearch"
 	"github.com/cloudwego/eino/adk/middlewares/filesystem"
 	"github.com/cloudwego/eino/adk/middlewares/patchtoolcalls"
 	"github.com/cloudwego/eino/adk/middlewares/plantask"
@@ -20,10 +20,13 @@ import (
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
+	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/hooks"
 	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/mcptools"
 	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/memory"
 	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/permission"
+	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/recovery"
 	agentruntime "github.com/wangle201210/learn-claude-code/final_eino_adk/internal/runtime"
+	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/todo"
 	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/workspace"
 )
 
@@ -93,6 +96,10 @@ func Build(ctx context.Context, primary, fallback model.ToolCallingChatModel, pr
 	if err != nil {
 		return nil, nil, err
 	}
+	todoMW, err := todo.New(nil)
+	if err != nil {
+		return nil, nil, err
+	}
 	var agentsMW adk.ChatModelAgentMiddleware
 	if _, err := os.Stat(filepath.Join(root, "CLAUDE.md")); err == nil {
 		agentsMW, err = agentsmd.New(ctx, &agentsmd.Config{
@@ -105,11 +112,22 @@ func Build(ctx context.Context, primary, fallback model.ToolCallingChatModel, pr
 		}
 	}
 
+	permissionMW, err := permission.NewFromRoot(root, prompt)
+	if err != nil {
+		return nil, nil, err
+	}
 	handlers := []adk.ChatModelAgentMiddleware{
 		patchMW,
-		permission.New(prompt),
+		permissionMW,
 		newCompactMiddleware(compactState, summaryMW),
 		summaryMW,
+	}
+	hooksMW, err := hooks.Load(root)
+	if err != nil {
+		return nil, nil, err
+	}
+	if hooksMW != nil {
+		handlers = append(handlers, hooksMW)
 	}
 	if agentsMW != nil {
 		// Eino agentsmd is transient model-call context. Keep it after summarization
@@ -120,20 +138,20 @@ func Build(ctx context.Context, primary, fallback model.ToolCallingChatModel, pr
 		reductionMW,
 		filesystemMW,
 		taskMW,
+		todoMW,
 		memory.NewMiddleware(primary),
 		newHistoryRecorderMiddleware(record),
 	)
 
-	if _, err := os.Stat(filepath.Join(root, "skills")); err == nil {
-		skillBackend, err := skill.NewBackendFromFilesystem(ctx, &skill.BackendFromFilesystemConfig{
-			Backend: workspaceBackend,
-			BaseDir: filepath.Join(root, "skills"),
-		})
-		if err != nil {
-			return nil, nil, err
-		}
+	skillBackend, err := buildSkillBackend(ctx, workspaceBackend, root)
+	if err != nil {
+		return nil, nil, err
+	}
+	if skillBackend != nil {
 		skillMW, err := skill.NewMiddleware(ctx, &skill.Config{
-			Backend: skillBackend,
+			Backend:  skillBackend,
+			AgentHub: newSkillAgentHub(primary, workspaceBackend, prompt),
+			ModelHub: newSkillModelHub(primary),
 		})
 		if err != nil {
 			return nil, nil, err
@@ -157,7 +175,7 @@ func Build(ctx context.Context, primary, fallback model.ToolCallingChatModel, pr
 	}
 	extraTools = append(extraTools, agentTools...)
 
-	runtimeTools, err := runtimeState.BuildTools(ctx, workspaceBackend)
+	runtimeTools, err := runtimeState.BuildTools(ctx, primary, workspaceBackend, prompt)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -167,22 +185,28 @@ func Build(ctx context.Context, primary, fallback model.ToolCallingChatModel, pr
 	if err != nil {
 		return nil, nil, err
 	}
-	extraTools = append(extraTools, mcpTools...)
+	if len(mcpTools) > 0 {
+		toolSearchMW, err := dynamicToolSearchMiddleware(ctx, mcpTools)
+		if err != nil {
+			return nil, nil, err
+		}
+		handlers = append(handlers, toolSearchMW)
+	}
+
+	instruction, err := buildInstruction(ctx, instructionInput{
+		Workspace:    cwd,
+		DirectTools:  extraTools,
+		DynamicTools: mcpTools,
+		SkillBackend: skillBackend,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
 
 	cfg := &adk.ChatModelAgentConfig{
-		Name:        "FinalAgent",
-		Description: "Coding agent (final version using eino abstractions).",
-		Instruction: fmt.Sprintf(
-			"You are a coding agent at %s. Use tools to solve tasks. Act, don't explain. "+
-				"Respect workspace boundaries and ask before risky writes or commands. "+
-				"Use task for isolated subtasks and teammate for bounded peer review or research. "+
-				"Use background_execute for long-running commands and check_notifications/background_status for results. "+
-				"Use schedule_cron/list_crons/cancel_cron for autonomous scheduled prompts. "+
-				"Use send_message/check_inbox/request_plan/review_plan/request_shutdown for protocol coordination. "+
-				"Use create_worktree/remove_worktree/keep_worktree when work should be isolated in a git worktree. "+
-				"MCP tools, when configured through FINAL_EINO_MCP_* env vars, appear as normal tools.",
-			cwd,
-		),
+		Name:          "FinalAgent",
+		Description:   "Coding agent (final version using eino abstractions).",
+		Instruction:   instruction,
 		Model:         primary,
 		MaxIterations: 25,
 		Handlers:      handlers,
@@ -197,6 +221,25 @@ func Build(ctx context.Context, primary, fallback model.ToolCallingChatModel, pr
 		// BackoffFunc 为 nil 时框架用默认（指数退避+jitter，100ms→10s）。
 		ModelRetryConfig: &adk.ModelRetryConfig{
 			MaxRetries: 3,
+			ShouldRetry: func(_ context.Context, retryCtx *adk.RetryContext) *adk.RetryDecision {
+				if retryCtx == nil {
+					return &adk.RetryDecision{}
+				}
+				if retryCtx.Err != nil {
+					return &adk.RetryDecision{Retry: recovery.IsRetryableModelError(retryCtx.Err)}
+				}
+				if recovery.IsOutputTruncated(retryCtx.OutputMessage) {
+					next := append(cloneMessages(retryCtx.InputMessages), cloneMessage(retryCtx.OutputMessage))
+					next = append(next, recovery.ContinuationMessage())
+					return &adk.RetryDecision{
+						Retry:                        true,
+						ModifiedInputMessages:        next,
+						PersistModifiedInputMessages: true,
+						RejectReason:                 "model output hit max_tokens",
+					}
+				}
+				return &adk.RetryDecision{}
+			},
 		},
 	}
 
@@ -229,4 +272,13 @@ func Build(ctx context.Context, primary, fallback model.ToolCallingChatModel, pr
 		return nil, nil, err
 	}
 	return agent, runtimeState, nil
+}
+
+func dynamicToolSearchMiddleware(ctx context.Context, dynamicTools []tool.BaseTool) (adk.ChatModelAgentMiddleware, error) {
+	if len(dynamicTools) == 0 {
+		return nil, nil
+	}
+	return toolsearch.New(ctx, &toolsearch.Config{
+		DynamicTools: dynamicTools,
+	})
 }

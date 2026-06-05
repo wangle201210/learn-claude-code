@@ -3,12 +3,17 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
+	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/permission"
 	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/workspace"
 )
 
@@ -23,21 +28,38 @@ type Runtime struct {
 	cronFile        string
 	mailboxDir      string
 	mainInboxOffset int64
+	teammates       map[string]*teammateRun
+	teammateIdle    time.Duration
+	taskMu          sync.Mutex
 }
 
 type noArgs struct{}
 
 func New(workdir string) *Runtime {
 	return &Runtime{
-		workdir:    workdir,
-		background: map[string]*backgroundTask{},
-		crons:      map[string]*cronJob{},
-		cronFile:   filepath.Join(workdir, ".scheduled_tasks.json"),
-		mailboxDir: filepath.Join(workdir, ".mailboxes"),
+		workdir:      workdir,
+		background:   map[string]*backgroundTask{},
+		crons:        map[string]*cronJob{},
+		cronFile:     filepath.Join(workdir, ".scheduled_tasks.json"),
+		mailboxDir:   filepath.Join(workdir, ".mailboxes"),
+		teammates:    map[string]*teammateRun{},
+		teammateIdle: teammateIdleTimeoutFromEnv(),
 	}
 }
 
-func (r *Runtime) BuildTools(_ context.Context, workspaceBackend *workspace.Backend) ([]tool.BaseTool, error) {
+func teammateIdleTimeoutFromEnv() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("FINAL_EINO_TEAMMATE_IDLE_MS"))
+	if raw == "" {
+		return defaultTeammateIdleTimeout
+	}
+	ms, err := strconv.Atoi(raw)
+	if err != nil || ms < 0 {
+		return defaultTeammateIdleTimeout
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
+func (r *Runtime) BuildTools(ctx context.Context, primary model.ToolCallingChatModel, workspaceBackend *workspace.Backend, prompt permission.PromptFunc) ([]tool.BaseTool, error) {
 	var out []tool.BaseTool
 	add := func(t tool.BaseTool, err error) error {
 		if err != nil {
@@ -54,6 +76,11 @@ func (r *Runtime) BuildTools(_ context.Context, workspaceBackend *workspace.Back
 	}
 	if err := add(utils.InferTool[*backgroundStatusArgs, string]("background_status", "Check one or all background command results.", func(ctx context.Context, input *backgroundStatusArgs) (string, error) {
 		return r.backgroundStatus(input.TaskID), nil
+	})); err != nil {
+		return nil, err
+	}
+	if err := add(utils.InferTool[*spawnTeammateArgs, string]("spawn_teammate", "Spawn a teammate agent in the background and receive its result through notifications.", func(toolCtx context.Context, input *spawnTeammateArgs) (string, error) {
+		return r.spawnTeammate(ctx, primary, workspaceBackend, prompt, input)
 	})); err != nil {
 		return nil, err
 	}

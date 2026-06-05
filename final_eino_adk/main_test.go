@@ -7,13 +7,15 @@ import (
 
 func TestIsManualCompact(t *testing.T) {
 	cases := map[string]bool{
-		"/compact":     true,
-		"compact":      true,
-		" COMPACT ":    true,
-		"/Compact":     true,
-		"":             false,
-		"compact now":  false,
-		"/compact now": false,
+		"/compact":      true,
+		"compact":       true,
+		" COMPACT ":     true,
+		"/Compact":      true,
+		"":              false,
+		"/model":        false,
+		"/model simple": false,
+		"compact now":   false,
+		"/compact now":  false,
 	}
 
 	for input, want := range cases {
@@ -70,8 +72,14 @@ func TestModelRouterConfigFromEnv(t *testing.T) {
 	t.Setenv("OPENAI_MODEL", "complex")
 	t.Setenv("FINAL_EINO_SIMPLE_MODEL", "simple")
 	t.Setenv("OPENAI_SIMPLE_MODEL", "ignored")
+	t.Setenv("ANTHROPIC_SMALL_FAST_MODEL", "")
+	t.Setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "")
+	t.Setenv("FINAL_EINO_STANDARD_MODEL", "")
+	t.Setenv("OPENAI_STANDARD_MODEL", "")
+	t.Setenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "")
 	t.Setenv("FINAL_EINO_COMPLEX_MODEL", "")
 	t.Setenv("OPENAI_COMPLEX_MODEL", "")
+	t.Setenv("ANTHROPIC_DEFAULT_OPUS_MODEL", "")
 	t.Setenv("FINAL_EINO_MODEL_ROUTING", "")
 
 	cfg := modelRouterConfigFromEnv()
@@ -86,11 +94,47 @@ func TestModelRouterConfigFromEnv(t *testing.T) {
 	}
 }
 
+func TestModelRouterConfigUsesAnthropicTierDefaults(t *testing.T) {
+	t.Setenv("OPENAI_MODEL", "openai-default")
+	t.Setenv("FINAL_EINO_SIMPLE_MODEL", "")
+	t.Setenv("OPENAI_SIMPLE_MODEL", "")
+	t.Setenv("ANTHROPIC_SMALL_FAST_MODEL", "")
+	t.Setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "haiku-default")
+	t.Setenv("FINAL_EINO_STANDARD_MODEL", "")
+	t.Setenv("OPENAI_STANDARD_MODEL", "")
+	t.Setenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "sonnet-default")
+	t.Setenv("FINAL_EINO_COMPLEX_MODEL", "")
+	t.Setenv("OPENAI_COMPLEX_MODEL", "")
+	t.Setenv("ANTHROPIC_DEFAULT_OPUS_MODEL", "opus-default")
+	t.Setenv("FINAL_EINO_MODEL_ROUTING", "")
+
+	cfg := modelRouterConfigFromEnv()
+	if got := cfg.modelForTier(modelRouteSimple); got != "haiku-default" {
+		t.Fatalf("simple tier = %q, want haiku-default", got)
+	}
+	if got := cfg.modelForTier(modelRouteStandard); got != "sonnet-default" {
+		t.Fatalf("standard tier = %q, want sonnet-default", got)
+	}
+	if got := cfg.modelForTier(modelRouteComplex); got != "opus-default" {
+		t.Fatalf("complex tier = %q, want opus-default", got)
+	}
+	if !cfg.enabled() {
+		t.Fatal("routing should be enabled")
+	}
+}
+
 func TestModelRouterSummaryDisabledWithoutSimpleModel(t *testing.T) {
 	t.Setenv("OPENAI_MODEL", "complex")
 	t.Setenv("FINAL_EINO_SIMPLE_MODEL", "")
 	t.Setenv("OPENAI_SIMPLE_MODEL", "")
 	t.Setenv("ANTHROPIC_SMALL_FAST_MODEL", "")
+	t.Setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "")
+	t.Setenv("FINAL_EINO_STANDARD_MODEL", "")
+	t.Setenv("OPENAI_STANDARD_MODEL", "")
+	t.Setenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "")
+	t.Setenv("FINAL_EINO_COMPLEX_MODEL", "")
+	t.Setenv("OPENAI_COMPLEX_MODEL", "")
+	t.Setenv("ANTHROPIC_DEFAULT_OPUS_MODEL", "")
 
 	if got := modelRoutingSummaryFromEnv(); got != "" {
 		t.Fatalf("summary = %q, want empty", got)

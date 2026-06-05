@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/cloudwego/eino/adk"
 	agentapp "github.com/wangle201210/learn-claude-code/final_eino_adk/internal/agent"
 	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/cli"
+	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/recovery"
 )
 
 var stdin = bufio.NewReader(os.Stdin)
@@ -85,7 +87,7 @@ func main() {
 				continue
 			}
 			compactController.RequestWithPrompt("Context compaction is complete. Reply in one short Chinese sentence confirming the conversation history was compacted.")
-			runAgent(ctx, runner, history, input, nil, "手动压缩上下文")
+			runAgentWithRecovery(ctx, runner, history, compactController, input, nil, "手动压缩上下文")
 			continue
 		}
 		var shouldRun bool
@@ -96,7 +98,7 @@ func main() {
 
 		history.beginRound()
 		input, userMessage := history.nextInput(query)
-		runAgent(ctx, runner, history, input, userMessage, "开始处理请求")
+		runAgentWithRecovery(ctx, runner, history, compactController, input, userMessage, "开始处理请求")
 	}
 }
 
@@ -119,25 +121,44 @@ func isManualCompact(query string) bool {
 	}
 }
 
-func runAgent(ctx context.Context, runner *adk.Runner, history *conversationHistory, input []adk.Message, userMessage adk.Message, startLog string) {
+type agentRunResult struct {
+	Messages []adk.Message
+	Err      error
+}
+
+func runAgent(ctx context.Context, runner *adk.Runner, history *conversationHistory, input []adk.Message, userMessage adk.Message, startLog string) agentRunResult {
 	logger := cli.NewRunLogger()
 	logger.Log(startLog)
+	runCtx, routeUsage := withModelRouteUsage(ctx)
 
 	// Runner.Run 每次都会新建 ADK run session；这里显式传入历史，保证多轮上下文连续。
-	iter := runner.Run(ctx, input)
+	iter := runner.Run(runCtx, input)
 	var roundMessages []adk.Message
+	var runErr error
 	for {
 		event, ok := iter.Next()
 		if !ok {
 			break
 		}
 		if event.Err != nil {
-			logger.Log("执行出错")
-			fmt.Printf("\033[31m%v\033[0m\n", event.Err)
-			break
+			runErr = event.Err
+			if !isRecoveringRetryError(event.Err) {
+				logger.Log("执行出错")
+				fmt.Printf("\033[31m%v\033[0m\n", event.Err)
+				break
+			}
+			logger.Log("模型输出被拒绝，正在按 Eino retry 策略自动恢复")
+			runErr = nil
+			continue
 		}
 		msg, err := logger.HandleEvent(event)
 		if err != nil {
+			runErr = err
+			if isRecoveringRetryError(err) {
+				logger.Log("模型输出被拒绝，正在按 Eino retry 策略自动恢复")
+				runErr = nil
+				continue
+			}
 			fmt.Printf("\033[31m%v\033[0m\n", err)
 			break
 		}
@@ -145,6 +166,35 @@ func runAgent(ctx context.Context, runner *adk.Runner, history *conversationHist
 			roundMessages = append(roundMessages, msg)
 		}
 	}
-	history.commitFallback(userMessage, roundMessages)
+	if summary := formatModelRouteUsage(routeUsage); summary != "" {
+		logger.Log(summary)
+	}
+	if runErr == nil || !recovery.IsPromptTooLong(runErr) {
+		history.commitFallback(userMessage, roundMessages)
+	}
 	fmt.Println()
+	return agentRunResult{Messages: roundMessages, Err: runErr}
+}
+
+func runAgentWithRecovery(ctx context.Context, runner *adk.Runner, history *conversationHistory, compactController *agentapp.CompactController, input []adk.Message, userMessage adk.Message, startLog string) agentRunResult {
+	result := runAgent(ctx, runner, history, input, userMessage, startLog)
+	if result.Err == nil || !recovery.IsPromptTooLong(result.Err) {
+		return result
+	}
+	if compactController == nil {
+		return result
+	}
+
+	cli.NewRunLogger().Log("上下文过长，触发反应式压缩后重试")
+	compactController.Request()
+	retryInput := append(copyMessages(input), result.Messages...)
+	if len(retryInput) == 0 {
+		return result
+	}
+	return runAgent(ctx, runner, history, retryInput, userMessage, "反应式压缩后重试")
+}
+
+func isRecoveringRetryError(err error) bool {
+	var willRetry *adk.WillRetryError
+	return errors.As(err, &willRetry)
 }

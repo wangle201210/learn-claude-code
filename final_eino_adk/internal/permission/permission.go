@@ -57,14 +57,32 @@ var permissionRules = []permRule{
 type permissionMiddleware struct {
 	*adk.BaseChatModelAgentMiddleware
 	prompt PromptFunc
+	config Config
 }
 
 type PromptFunc func(prompt string) (string, bool)
 
 func New(prompt PromptFunc) adk.ChatModelAgentMiddleware {
+	mw, err := NewFromRoot(workspace.Dir(), prompt)
+	if err != nil {
+		return NewWithConfig(prompt, Config{})
+	}
+	return mw
+}
+
+func NewFromRoot(root string, prompt PromptFunc) (adk.ChatModelAgentMiddleware, error) {
+	config, err := LoadConfig(root)
+	if err != nil {
+		return nil, err
+	}
+	return NewWithConfig(prompt, config), nil
+}
+
+func NewWithConfig(prompt PromptFunc, config Config) adk.ChatModelAgentMiddleware {
 	return &permissionMiddleware{
 		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
 		prompt:                       prompt,
+		config:                       config,
 	}
 }
 
@@ -107,7 +125,34 @@ func (m *permissionMiddleware) checkPermission(toolName, rawArgs string) (bool, 
 		}
 	}
 
+	if rule, ok := m.config.firstMatching("deny", toolName, args); ok {
+		reason := "Denied by permission rule " + rule.Raw
+		fmt.Printf("\n\033[31m%s\033[0m\n", reason)
+		return false, reason
+	}
+
+	if _, ok := m.config.firstMatching("allow", toolName, args); ok {
+		return true, ""
+	}
+
+	if rule, ok := m.config.firstMatching("ask", toolName, args); ok {
+		reason := "Permission rule " + rule.Raw + " requires approval"
+		if m.askUser(toolName, rawArgs, reason) == "deny" {
+			return false, reason
+		}
+		return true, ""
+	}
+
+	if m.config.deniesByDefaultMode(toolName) {
+		reason := "Denied by permissions.defaultMode=" + m.config.DefaultMode
+		fmt.Printf("\n\033[31m%s\033[0m\n", reason)
+		return false, reason
+	}
+
 	if reason := checkRules(toolName, args); reason != "" {
+		if m.config.allowsByDefaultMode(toolName) {
+			return true, ""
+		}
 		if m.askUser(toolName, rawArgs, reason) == "deny" {
 			return false, reason
 		}
