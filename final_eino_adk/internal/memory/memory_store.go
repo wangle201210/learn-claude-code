@@ -6,7 +6,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 )
+
+const memoryCacheTTL = 5 * time.Second
 
 type memoryFile struct {
 	filename    string
@@ -15,6 +19,18 @@ type memoryFile struct {
 	typ         string
 	body        string
 }
+
+type memorySnapshot struct {
+	index    string
+	files    []memoryFile
+	contents map[string]string
+}
+
+var storeCache = struct {
+	mu        sync.Mutex
+	expiresAt time.Time
+	snapshot  memorySnapshot
+}{}
 
 func slugify(name string) string {
 	s := strings.ToLower(strings.TrimSpace(name))
@@ -31,10 +47,12 @@ func writeMemoryFile(name, typ, description, body string) {
 	path := filepath.Join(memoryDir, slugify(name)+".md")
 	content := fmt.Sprintf("---\nname: %s\ndescription: %s\ntype: %s\n---\n\n%s\n", name, description, typ, body)
 	_ = os.WriteFile(path, []byte(content), 0o644)
+	invalidateMemoryCache()
 	rebuildIndex()
 }
 
 func rebuildIndex() {
+	invalidateMemoryCache()
 	files := listMemoryFiles()
 	var b strings.Builder
 	for _, f := range files {
@@ -42,28 +60,56 @@ func rebuildIndex() {
 	}
 	_ = os.MkdirAll(memoryDir, 0o755)
 	_ = os.WriteFile(memoryIndex, []byte(b.String()), 0o644)
+	invalidateMemoryCache()
 }
 
 func readMemoryIndex() string {
-	data, err := os.ReadFile(memoryIndex)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(data))
+	return getMemorySnapshot().index
 }
 
 func readMemoryFile(filename string) (string, bool) {
-	data, err := os.ReadFile(filepath.Join(memoryDir, filename))
-	if err != nil {
-		return "", false
-	}
-	return string(data), true
+	content, ok := getMemorySnapshot().contents[filename]
+	return content, ok
 }
 
 func listMemoryFiles() []memoryFile {
+	return cloneMemoryFiles(getMemorySnapshot().files)
+}
+
+func getMemorySnapshot() memorySnapshot {
+	now := time.Now()
+	storeCache.mu.Lock()
+	defer storeCache.mu.Unlock()
+	if now.Before(storeCache.expiresAt) {
+		return cloneMemorySnapshot(storeCache.snapshot)
+	}
+	storeCache.snapshot = loadMemorySnapshotFromDisk()
+	storeCache.expiresAt = now.Add(memoryCacheTTL)
+	return cloneMemorySnapshot(storeCache.snapshot)
+}
+
+func invalidateMemoryCache() {
+	storeCache.mu.Lock()
+	defer storeCache.mu.Unlock()
+	storeCache.expiresAt = time.Time{}
+	storeCache.snapshot = memorySnapshot{}
+}
+
+func warmMemorySnapshot() {
+	_ = getMemorySnapshot()
+}
+
+func loadMemorySnapshotFromDisk() memorySnapshot {
+	snapshot := memorySnapshot{
+		contents: map[string]string{},
+	}
+	if data, err := os.ReadFile(memoryIndex); err == nil {
+		snapshot.index = strings.TrimSpace(string(data))
+	}
+
 	entries, err := os.ReadDir(memoryDir)
 	if err != nil {
-		return nil
+		return snapshot
 	}
 	var names []string
 	for _, e := range entries {
@@ -73,24 +119,53 @@ func listMemoryFiles() []memoryFile {
 	}
 	sort.Strings(names)
 
-	var out []memoryFile
 	for _, fn := range names {
 		raw, err := os.ReadFile(filepath.Join(memoryDir, fn))
 		if err != nil {
 			continue
 		}
-		meta, body := parseSimpleFrontmatter(string(raw))
+		text := string(raw)
+		snapshot.contents[fn] = text
+		meta, body := parseSimpleFrontmatter(text)
 		name := meta["name"]
 		if name == "" {
 			name = strings.TrimSuffix(fn, ".md")
 		}
-		out = append(out, memoryFile{
+		snapshot.files = append(snapshot.files, memoryFile{
 			filename:    fn,
 			name:        name,
 			description: meta["description"],
 			typ:         orDefault(meta["type"], "user"),
 			body:        body,
 		})
+	}
+	return snapshot
+}
+
+func cloneMemorySnapshot(snapshot memorySnapshot) memorySnapshot {
+	return memorySnapshot{
+		index:    snapshot.index,
+		files:    cloneMemoryFiles(snapshot.files),
+		contents: cloneStringMap(snapshot.contents),
+	}
+}
+
+func cloneMemoryFiles(files []memoryFile) []memoryFile {
+	if len(files) == 0 {
+		return nil
+	}
+	out := make([]memoryFile, len(files))
+	copy(out, files)
+	return out
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
 	}
 	return out
 }

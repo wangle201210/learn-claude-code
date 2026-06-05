@@ -46,6 +46,9 @@ func TestFinalAgentCarriesHistoryWithoutDuplicatingSystemMessages(t *testing.T) 
 	if got := countRole(stored, schema.System); got != 0 {
 		t.Fatalf("stored history system messages = %d, want 0", got)
 	}
+	if fake.memoryCalls() != 0 {
+		t.Fatalf("ordinary conversation memory model calls = %d, want 0", fake.memoryCalls())
+	}
 	assertRoleContents(t, stored,
 		roleContent{role: schema.User, content: "first"},
 		roleContent{role: schema.Assistant, content: "agent reply 1"},
@@ -118,6 +121,7 @@ type finalTestModel struct {
 	mu        sync.Mutex
 	responses int
 	summaries int
+	memories  int
 	inputs    [][]*schema.Message
 	tools     [][]string
 }
@@ -150,6 +154,9 @@ func (m *finalTestModel) respond(_ context.Context, input []*schema.Message, opt
 		return schema.AssistantMessage("summary: first", nil), nil
 	}
 	if isMemoryPrompt(input) {
+		m.mu.Lock()
+		m.memories++
+		m.mu.Unlock()
 		return schema.AssistantMessage("[]", nil), nil
 	}
 
@@ -190,6 +197,12 @@ func (m *finalTestModel) summaryCalls() int {
 	return m.summaries
 }
 
+func (m *finalTestModel) memoryCalls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.memories
+}
+
 func isSummaryPrompt(input []*schema.Message) bool {
 	if len(input) == 0 {
 		return false
@@ -204,7 +217,6 @@ func isMemoryPrompt(input []*schema.Message) bool {
 	}
 	content := input[len(input)-1].Content
 	return strings.Contains(content, "Extract durable user preferences") ||
-		strings.Contains(content, "select the indices of memories") ||
 		strings.Contains(content, "Consolidate the following memory files")
 }
 

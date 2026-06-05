@@ -15,6 +15,22 @@ import (
 
 const consolidateThreshold = 10
 
+var memoryTriggerTerms = []string{
+	"remember",
+	"memory",
+	"preference",
+	"prefer",
+	"constraint",
+	"记住",
+	"记忆",
+	"偏好",
+	"习惯",
+	"约束",
+	"要求",
+	"以后",
+	"下次",
+}
+
 type memoryItem struct {
 	Name        string `json:"name"`
 	Type        string `json:"type"`
@@ -107,6 +123,23 @@ func consolidateMemories(ctx context.Context, m model.BaseChatModel) {
 		}
 	}
 	fmt.Printf("\n\033[33m[Memory: consolidated %d -> %d memories]\033[0m\n", len(files), len(items))
+}
+
+func shouldExtractMemories(messages []*schema.Message) bool {
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg := messages[i]
+		if msg == nil || msg.Role != schema.User {
+			continue
+		}
+		content := strings.ToLower(msg.Content)
+		for _, term := range memoryTriggerTerms {
+			if strings.Contains(content, strings.ToLower(term)) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
 }
 
 func tailMessages(messages []*schema.Message, n int) []*schema.Message {
