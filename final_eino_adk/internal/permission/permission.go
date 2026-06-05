@@ -1,4 +1,4 @@
-package main
+package permission
 
 import (
 	"context"
@@ -9,6 +9,8 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/textutil"
+	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/workspace"
 )
 
 var denyList = []string{"rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if=", "> /dev/sda"}
@@ -23,11 +25,11 @@ var permissionRules = []permRule{
 	{
 		tools: []string{"write_file", "edit_file"},
 		check: func(args map[string]any) bool {
-			path := firstString(args, "file_path", "path")
+			path := textutil.FirstString(args, "file_path", "path")
 			if path == "" {
 				return false
 			}
-			_, err := safePath(path)
+			_, err := workspace.SafePath(path)
 			return err != nil
 		},
 		message: "Writing outside workspace",
@@ -35,7 +37,7 @@ var permissionRules = []permRule{
 	{
 		tools: []string{"execute", "bash", "background_execute"},
 		check: func(args map[string]any) bool {
-			cmd := firstString(args, "command")
+			cmd := textutil.FirstString(args, "command")
 			return strings.Contains(cmd, "rm ") ||
 				strings.Contains(cmd, "> /etc/") ||
 				strings.Contains(cmd, "chmod 777")
@@ -54,22 +56,28 @@ var permissionRules = []permRule{
 
 type permissionMiddleware struct {
 	*adk.BaseChatModelAgentMiddleware
+	prompt PromptFunc
 }
 
-func newPermissionMiddleware() adk.ChatModelAgentMiddleware {
-	return &permissionMiddleware{BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{}}
+type PromptFunc func(prompt string) (string, bool)
+
+func New(prompt PromptFunc) adk.ChatModelAgentMiddleware {
+	return &permissionMiddleware{
+		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
+		prompt:                       prompt,
+	}
 }
 
 func (m *permissionMiddleware) WrapInvokableToolCall(_ context.Context, endpoint adk.InvokableToolCallEndpoint, tCtx *adk.ToolContext) (adk.InvokableToolCallEndpoint, error) {
 	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
-		if allowed, reason := checkPermission(tCtx.Name, argumentsInJSON); !allowed {
+		if allowed, reason := m.checkPermission(tCtx.Name, argumentsInJSON); !allowed {
 			return "Permission denied: " + reason, nil
 		}
 		return endpoint(ctx, argumentsInJSON, opts...)
 	}, nil
 }
 
-func checkDenyList(command string) string {
+func CheckDenyList(command string) string {
 	for _, p := range denyList {
 		if strings.Contains(command, p) {
 			return fmt.Sprintf("blocked dangerous command containing %q", p)
@@ -87,30 +95,33 @@ func checkRules(toolName string, args map[string]any) string {
 	return ""
 }
 
-func checkPermission(toolName, rawArgs string) (bool, string) {
+func (m *permissionMiddleware) checkPermission(toolName, rawArgs string) (bool, string) {
 	var args map[string]any
 	_ = json.Unmarshal([]byte(rawArgs), &args)
 
 	if toolName == "execute" || toolName == "bash" || toolName == "background_execute" {
-		cmd := firstString(args, "command")
-		if reason := checkDenyList(cmd); reason != "" {
+		cmd := textutil.FirstString(args, "command")
+		if reason := CheckDenyList(cmd); reason != "" {
 			fmt.Printf("\n\033[31m%s\033[0m\n", reason)
 			return false, reason
 		}
 	}
 
 	if reason := checkRules(toolName, args); reason != "" {
-		if askUser(toolName, rawArgs, reason) == "deny" {
+		if m.askUser(toolName, rawArgs, reason) == "deny" {
 			return false, reason
 		}
 	}
 	return true, ""
 }
 
-func askUser(toolName, rawArgs, reason string) string {
+func (m *permissionMiddleware) askUser(toolName, rawArgs, reason string) string {
 	fmt.Printf("\n\033[33m%s\033[0m\n", reason)
 	fmt.Printf("Tool: %s(%s)\n", toolName, rawArgs)
-	line, ok := readLine("Allow? [y/N] ")
+	if m.prompt == nil {
+		return "deny"
+	}
+	line, ok := m.prompt("Allow? [y/N] ")
 	if !ok {
 		return "deny"
 	}

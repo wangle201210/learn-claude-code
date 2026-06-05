@@ -1,4 +1,4 @@
-package main
+package memory
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/textutil"
 )
 
 func loadMemories(ctx context.Context, m model.BaseChatModel, messages []*schema.Message) string {
@@ -33,7 +34,7 @@ func selectRelevantMemories(ctx context.Context, m model.BaseChatModel, messages
 	if len(files) == 0 {
 		return nil
 	}
-	recent := textFromMessages(messages, 2000)
+	recent := textutil.TextFromMessages(messages, 2000)
 	if strings.TrimSpace(recent) == "" {
 		return nil
 	}
@@ -49,7 +50,7 @@ func selectRelevantMemories(ctx context.Context, m model.BaseChatModel, messages
 
 	const maxItems = 5
 	if resp, err := m.Generate(ctx, []*schema.Message{schema.UserMessage(prompt)}); err == nil {
-		if arr := extractJSONArray(resp.Content); arr != "" {
+		if arr := textutil.ExtractJSONArray(resp.Content); arr != "" {
 			var indices []int
 			if json.Unmarshal([]byte(arr), &indices) == nil {
 				var selected []string

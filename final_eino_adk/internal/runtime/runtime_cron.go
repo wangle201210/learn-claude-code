@@ -1,4 +1,4 @@
-package main
+package runtime
 
 import (
 	"context"
@@ -33,7 +33,7 @@ type cronIDArgs struct {
 	ID string `json:"id" jsonschema:"required" jsonschema_description:"Cron job id"`
 }
 
-func (r *agentRuntime) scheduleCron(input *scheduleCronArgs) (string, error) {
+func (r *Runtime) scheduleCron(input *scheduleCronArgs) (string, error) {
 	if err := validateCron(input.Cron); err != nil {
 		return "", err
 	}
@@ -63,7 +63,7 @@ func (r *agentRuntime) scheduleCron(input *scheduleCronArgs) (string, error) {
 	return fmt.Sprintf("Scheduled cron %s.", id), nil
 }
 
-func (r *agentRuntime) listCrons() string {
+func (r *Runtime) listCrons() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -85,7 +85,7 @@ func (r *agentRuntime) listCrons() string {
 	return strings.TrimSpace(b.String())
 }
 
-func (r *agentRuntime) cancelCron(id string) (string, error) {
+func (r *Runtime) cancelCron(id string) (string, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return "", errors.New("id is required")
@@ -100,7 +100,7 @@ func (r *agentRuntime) cancelCron(id string) (string, error) {
 	return "Cancelled cron " + id + ".", nil
 }
 
-func (r *agentRuntime) cronLoop(ctx context.Context) {
+func (r *Runtime) cronLoop(ctx context.Context) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
@@ -113,7 +113,7 @@ func (r *agentRuntime) cronLoop(ctx context.Context) {
 	}
 }
 
-func (r *agentRuntime) tickCrons(now time.Time) {
+func (r *Runtime) tickCrons(now time.Time) {
 	if now.Second() != 0 {
 		return
 	}
@@ -138,7 +138,7 @@ func (r *agentRuntime) tickCrons(now time.Time) {
 	}
 }
 
-func (r *agentRuntime) loadCrons() {
+func (r *Runtime) loadCrons() {
 	data, err := os.ReadFile(r.cronFile)
 	if err != nil {
 		return
@@ -156,7 +156,7 @@ func (r *agentRuntime) loadCrons() {
 	}
 }
 
-func (r *agentRuntime) saveCronsLocked() {
+func (r *Runtime) saveCronsLocked() {
 	var jobs []*cronJob
 	for _, job := range r.crons {
 		if job.Durable {

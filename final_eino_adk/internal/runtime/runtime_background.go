@@ -1,4 +1,4 @@
-package main
+package runtime
 
 import (
 	"context"
@@ -9,6 +9,8 @@ import (
 	"time"
 
 	adkfs "github.com/cloudwego/eino/adk/filesystem"
+	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/textutil"
+	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/workspace"
 )
 
 type backgroundTask struct {
@@ -34,10 +36,7 @@ type backgroundStatusArgs struct {
 	TaskID string `json:"task_id,omitempty" jsonschema_description:"Specific background task id. Omit to list all tasks"`
 }
 
-func (r *agentRuntime) startBackgroundCommand(workspace *workspaceBackend, input *backgroundExecuteArgs) (string, error) {
-	if workspace.shell == nil {
-		return "", errors.New("shell is not configured")
-	}
+func (r *Runtime) startBackgroundCommand(workspace *workspace.Backend, input *backgroundExecuteArgs) (string, error) {
 	command := strings.TrimSpace(input.Command)
 	if command == "" {
 		return "", errors.New("command is required")
@@ -67,7 +66,7 @@ func (r *agentRuntime) startBackgroundCommand(workspace *workspaceBackend, input
 		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
 		defer cancel()
 
-		resp, err := workspace.shell.Execute(ctx, &adkfs.ExecuteRequest{Command: command})
+		resp, err := workspace.ExecuteBackground(ctx, &adkfs.ExecuteRequest{Command: command})
 		now := time.Now()
 
 		r.mu.Lock()
@@ -81,7 +80,7 @@ func (r *agentRuntime) startBackgroundCommand(workspace *workspaceBackend, input
 		} else {
 			task.Status = "succeeded"
 			if resp != nil {
-				task.Output = truncate(resp.Output, 20000)
+				task.Output = textutil.Truncate(resp.Output, 20000)
 				task.ExitCode = resp.ExitCode
 				if resp.ExitCode != nil && *resp.ExitCode != 0 {
 					task.Status = "failed"
@@ -94,7 +93,7 @@ func (r *agentRuntime) startBackgroundCommand(workspace *workspaceBackend, input
 	return fmt.Sprintf("Started background task %s.", id), nil
 }
 
-func (r *agentRuntime) backgroundStatus(taskID string) string {
+func (r *Runtime) backgroundStatus(taskID string) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 

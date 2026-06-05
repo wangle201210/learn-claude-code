@@ -1,4 +1,4 @@
-package main
+package workspace
 
 import (
 	"fmt"
@@ -8,6 +8,10 @@ import (
 )
 
 var workdir = findWorkspaceRoot(mustGetwd())
+
+func Dir() string {
+	return workdir
+}
 
 func mustGetwd() string {
 	cwd, err := os.Getwd()
@@ -39,8 +43,8 @@ func isRepoWorkspaceRoot(dir string) bool {
 	return true
 }
 
-// safePath keeps all filesystem middleware access under the current workspace.
-func safePath(p string) (string, error) {
+// SafePath keeps all filesystem middleware access under the current workspace.
+func SafePath(p string) (string, error) {
 	if strings.TrimSpace(p) == "" {
 		p = "."
 	}

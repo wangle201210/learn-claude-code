@@ -1,4 +1,4 @@
-package main
+package runtime
 
 import (
 	"errors"
@@ -34,7 +34,7 @@ type reviewPlanArgs struct {
 	Comments  string `json:"comments,omitempty" jsonschema_description:"Review comments"`
 }
 
-func (r *agentRuntime) sendMessage(input *sendMessageArgs) (string, error) {
+func (r *Runtime) sendMessage(input *sendMessageArgs) (string, error) {
 	to, err := validateMailboxName(input.To)
 	if err != nil {
 		return "", err
@@ -65,7 +65,7 @@ func (r *agentRuntime) sendMessage(input *sendMessageArgs) (string, error) {
 	return fmt.Sprintf("Sent %s to %s.", msg.ID, to), nil
 }
 
-func (r *agentRuntime) checkInbox(input *checkInboxArgs) (string, error) {
+func (r *Runtime) checkInbox(input *checkInboxArgs) (string, error) {
 	name := input.Name
 	if name == "" {
 		name = "main"
@@ -91,7 +91,7 @@ func (r *agentRuntime) checkInbox(input *checkInboxArgs) (string, error) {
 	return formatMessages(msgs), nil
 }
 
-func (r *agentRuntime) requestShutdown(input *requestShutdownArgs) (string, error) {
+func (r *Runtime) requestShutdown(input *requestShutdownArgs) (string, error) {
 	return r.sendMessage(&sendMessageArgs{
 		To:      "main",
 		From:    "protocol",
@@ -101,7 +101,7 @@ func (r *agentRuntime) requestShutdown(input *requestShutdownArgs) (string, erro
 	})
 }
 
-func (r *agentRuntime) requestPlan(input *requestPlanArgs) (string, error) {
+func (r *Runtime) requestPlan(input *requestPlanArgs) (string, error) {
 	id := fmt.Sprintf("plan-%d", time.Now().UnixNano())
 	if _, err := r.sendMessage(&sendMessageArgs{
 		To:      "main",
@@ -115,7 +115,7 @@ func (r *agentRuntime) requestPlan(input *requestPlanArgs) (string, error) {
 	return "Created plan request " + id + ".", nil
 }
 
-func (r *agentRuntime) reviewPlan(input *reviewPlanArgs) (string, error) {
+func (r *Runtime) reviewPlan(input *reviewPlanArgs) (string, error) {
 	decision := strings.TrimSpace(input.Decision)
 	if decision != "approved" && decision != "changes_requested" && decision != "rejected" {
 		return "", errors.New("decision must be approved, changes_requested, or rejected")

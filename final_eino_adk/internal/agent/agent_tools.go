@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"context"
@@ -13,17 +13,19 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
+	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/permission"
+	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/workspace"
 )
 
 type delegateArgs struct {
 	Request string `json:"request" jsonschema:"required" jsonschema_description:"The task or question for the delegated agent"`
 }
 
-func buildAgentTools(ctx context.Context, primary model.ToolCallingChatModel, workspace *workspaceBackend) ([]tool.BaseTool, error) {
+func buildAgentTools(ctx context.Context, primary model.ToolCallingChatModel, workspaceBackend *workspace.Backend, prompt permission.PromptFunc) ([]tool.BaseTool, error) {
 	taskAgent, err := buildDelegateAgent(ctx, "task_subagent",
 		"Run an isolated coding/research subtask with workspace tools and return the result.",
 		"You are a focused subagent. Complete the delegated task using available workspace tools. Return concise findings, changed files, and any remaining risks. Do not delegate further.",
-		primary, workspace)
+		primary, workspaceBackend, prompt)
 	if err != nil {
 		return nil, err
 	}
@@ -35,7 +37,7 @@ func buildAgentTools(ctx context.Context, primary model.ToolCallingChatModel, wo
 	teammateAgent, err := buildDelegateAgent(ctx, "teammate",
 		"Ask a teammate agent to review, research, or implement a bounded piece of work.",
 		"You are a teammate agent. Use the chat history and workspace tools to help with the requested role. Be direct: report conclusions, evidence, and concrete next steps. Do not delegate further.",
-		primary, workspace)
+		primary, workspaceBackend, prompt)
 	if err != nil {
 		return nil, err
 	}
@@ -47,14 +49,14 @@ func buildAgentTools(ctx context.Context, primary model.ToolCallingChatModel, wo
 	return []tool.BaseTool{taskTool, teammateTool}, nil
 }
 
-func buildDelegateAgent(ctx context.Context, name, desc, instruction string, primary model.ToolCallingChatModel, workspace *workspaceBackend) (*adk.ChatModelAgent, error) {
+func buildDelegateAgent(ctx context.Context, name, desc, instruction string, primary model.ToolCallingChatModel, workspaceBackend *workspace.Backend, prompt permission.PromptFunc) (*adk.ChatModelAgent, error) {
 	patchMW, err := patchtoolcalls.New(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	reductionMW, err := reduction.New(ctx, &reduction.Config{
-		Backend:                   workspace,
-		RootDir:                   filepath.Join(workdir, ".task_outputs", name),
+		Backend:                   workspaceBackend,
+		RootDir:                   filepath.Join(workspace.Dir(), ".task_outputs", name),
 		MaxLengthForTrunc:         50000,
 		MaxTokensForClear:         50000,
 		ClearRetentionSuffixLimit: 6,
@@ -63,8 +65,8 @@ func buildDelegateAgent(ctx context.Context, name, desc, instruction string, pri
 		return nil, err
 	}
 	filesystemMW, err := filesystem.New(ctx, &filesystem.MiddlewareConfig{
-		Backend:           workspace,
-		Shell:             workspace,
+		Backend:           workspaceBackend,
+		Shell:             workspaceBackend,
 		UseMultiModalRead: false,
 	})
 	if err != nil {
@@ -79,7 +81,7 @@ func buildDelegateAgent(ctx context.Context, name, desc, instruction string, pri
 		MaxIterations: 12,
 		Handlers: []adk.ChatModelAgentMiddleware{
 			patchMW,
-			newPermissionMiddleware(),
+			permission.New(prompt),
 			reductionMW,
 			filesystemMW,
 		},

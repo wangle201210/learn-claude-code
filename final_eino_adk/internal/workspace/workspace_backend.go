@@ -1,4 +1,4 @@
-package main
+package workspace
 
 import (
 	"context"
@@ -7,18 +7,27 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/cloudwego/eino-ext/adk/backend/local"
 	adkfs "github.com/cloudwego/eino/adk/filesystem"
 	adkfsmw "github.com/cloudwego/eino/adk/middlewares/filesystem"
 	"github.com/cloudwego/eino/adk/middlewares/plantask"
 )
 
-type workspaceBackend struct {
+type Backend struct {
 	adkfs.Backend
 	shell adkfs.Shell
 }
 
-func (b *workspaceBackend) LsInfo(ctx context.Context, req *adkfs.LsInfoRequest) ([]adkfs.FileInfo, error) {
-	p, err := safePath(req.Path)
+func New(ctx context.Context, validateCommand func(string) error) (*Backend, error) {
+	localBackend, err := local.NewBackend(ctx, &local.Config{ValidateCommand: validateCommand})
+	if err != nil {
+		return nil, err
+	}
+	return &Backend{Backend: localBackend, shell: localBackend}, nil
+}
+
+func (b *Backend) LsInfo(ctx context.Context, req *adkfs.LsInfoRequest) ([]adkfs.FileInfo, error) {
+	p, err := SafePath(req.Path)
 	if err != nil {
 		return nil, err
 	}
@@ -29,8 +38,8 @@ func (b *workspaceBackend) LsInfo(ctx context.Context, req *adkfs.LsInfoRequest)
 	return files, nil
 }
 
-func (b *workspaceBackend) Read(ctx context.Context, req *adkfs.ReadRequest) (*adkfs.FileContent, error) {
-	p, err := safePath(req.FilePath)
+func (b *Backend) Read(ctx context.Context, req *adkfs.ReadRequest) (*adkfs.FileContent, error) {
+	p, err := SafePath(req.FilePath)
 	if err != nil {
 		return nil, err
 	}
@@ -41,12 +50,12 @@ func (b *workspaceBackend) Read(ctx context.Context, req *adkfs.ReadRequest) (*a
 	})
 }
 
-func (b *workspaceBackend) GrepRaw(ctx context.Context, req *adkfs.GrepRequest) ([]adkfs.GrepMatch, error) {
+func (b *Backend) GrepRaw(ctx context.Context, req *adkfs.GrepRequest) ([]adkfs.GrepMatch, error) {
 	path := req.Path
 	if path == "" {
 		path = "."
 	}
-	p, err := safePath(path)
+	p, err := SafePath(path)
 	if err != nil {
 		return nil, err
 	}
@@ -59,12 +68,12 @@ func (b *workspaceBackend) GrepRaw(ctx context.Context, req *adkfs.GrepRequest) 
 	return matches, nil
 }
 
-func (b *workspaceBackend) GlobInfo(ctx context.Context, req *adkfs.GlobInfoRequest) ([]adkfs.FileInfo, error) {
+func (b *Backend) GlobInfo(ctx context.Context, req *adkfs.GlobInfoRequest) ([]adkfs.FileInfo, error) {
 	path := req.Path
 	if path == "" {
 		path = "."
 	}
-	p, err := safePath(path)
+	p, err := SafePath(path)
 	if err != nil {
 		return nil, err
 	}
@@ -78,8 +87,8 @@ func (b *workspaceBackend) GlobInfo(ctx context.Context, req *adkfs.GlobInfoRequ
 	return files, nil
 }
 
-func (b *workspaceBackend) Write(ctx context.Context, req *adkfs.WriteRequest) error {
-	p, err := safePath(req.FilePath)
+func (b *Backend) Write(ctx context.Context, req *adkfs.WriteRequest) error {
+	p, err := SafePath(req.FilePath)
 	if err != nil {
 		return err
 	}
@@ -89,8 +98,8 @@ func (b *workspaceBackend) Write(ctx context.Context, req *adkfs.WriteRequest) e
 	})
 }
 
-func (b *workspaceBackend) Edit(ctx context.Context, req *adkfs.EditRequest) error {
-	p, err := safePath(req.FilePath)
+func (b *Backend) Edit(ctx context.Context, req *adkfs.EditRequest) error {
+	p, err := SafePath(req.FilePath)
 	if err != nil {
 		return err
 	}
@@ -102,7 +111,7 @@ func (b *workspaceBackend) Edit(ctx context.Context, req *adkfs.EditRequest) err
 	})
 }
 
-func (b *workspaceBackend) MultiModalRead(ctx context.Context, req *adkfs.MultiModalReadRequest) (*adkfs.MultiFileContent, error) {
+func (b *Backend) MultiModalRead(ctx context.Context, req *adkfs.MultiModalReadRequest) (*adkfs.MultiFileContent, error) {
 	reader, ok := b.Backend.(adkfs.MultiModalReader)
 	if !ok {
 		content, err := b.Read(ctx, &req.ReadRequest)
@@ -111,7 +120,7 @@ func (b *workspaceBackend) MultiModalRead(ctx context.Context, req *adkfs.MultiM
 		}
 		return &adkfs.MultiFileContent{FileContent: content}, nil
 	}
-	p, err := safePath(req.FilePath)
+	p, err := SafePath(req.FilePath)
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +129,7 @@ func (b *workspaceBackend) MultiModalRead(ctx context.Context, req *adkfs.MultiM
 	return reader.MultiModalRead(ctx, &next)
 }
 
-func (b *workspaceBackend) Execute(ctx context.Context, input *adkfs.ExecuteRequest) (*adkfs.ExecuteResponse, error) {
+func (b *Backend) Execute(ctx context.Context, input *adkfs.ExecuteRequest) (*adkfs.ExecuteResponse, error) {
 	if b.shell == nil {
 		return nil, errors.New("shell is not configured")
 	}
@@ -133,11 +142,22 @@ func (b *workspaceBackend) Execute(ctx context.Context, input *adkfs.ExecuteRequ
 	return resp, err
 }
 
-type taskBackend struct {
-	backend *workspaceBackend
+func (b *Backend) ExecuteBackground(ctx context.Context, input *adkfs.ExecuteRequest) (*adkfs.ExecuteResponse, error) {
+	if b.shell == nil {
+		return nil, errors.New("shell is not configured")
+	}
+	return b.shell.Execute(ctx, input)
 }
 
-func (b *taskBackend) LsInfo(ctx context.Context, req *plantask.LsInfoRequest) ([]plantask.FileInfo, error) {
+type TaskBackend struct {
+	backend *Backend
+}
+
+func NewTaskBackend(backend *Backend) *TaskBackend {
+	return &TaskBackend{backend: backend}
+}
+
+func (b *TaskBackend) LsInfo(ctx context.Context, req *plantask.LsInfoRequest) ([]plantask.FileInfo, error) {
 	files, err := b.backend.LsInfo(ctx, (*adkfs.LsInfoRequest)(req))
 	if err != nil {
 		return nil, err
@@ -150,16 +170,16 @@ func (b *taskBackend) LsInfo(ctx context.Context, req *plantask.LsInfoRequest) (
 	return files, nil
 }
 
-func (b *taskBackend) Read(ctx context.Context, req *plantask.ReadRequest) (*adkfsmw.FileContent, error) {
+func (b *TaskBackend) Read(ctx context.Context, req *plantask.ReadRequest) (*adkfsmw.FileContent, error) {
 	return b.backend.Read(ctx, (*adkfs.ReadRequest)(req))
 }
 
-func (b *taskBackend) Write(ctx context.Context, req *plantask.WriteRequest) error {
+func (b *TaskBackend) Write(ctx context.Context, req *plantask.WriteRequest) error {
 	return b.backend.Write(ctx, (*adkfs.WriteRequest)(req))
 }
 
-func (b *taskBackend) Delete(ctx context.Context, req *plantask.DeleteRequest) error {
-	p, err := safePath(req.FilePath)
+func (b *TaskBackend) Delete(ctx context.Context, req *plantask.DeleteRequest) error {
+	p, err := SafePath(req.FilePath)
 	if err != nil {
 		return err
 	}

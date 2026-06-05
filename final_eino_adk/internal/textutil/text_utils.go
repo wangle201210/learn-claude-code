@@ -1,4 +1,4 @@
-package main
+package textutil
 
 import (
 	"strings"
@@ -6,7 +6,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-func firstString(args map[string]any, keys ...string) string {
+func FirstString(args map[string]any, keys ...string) string {
 	for _, key := range keys {
 		if v, _ := args[key].(string); v != "" {
 			return v
@@ -15,7 +15,7 @@ func firstString(args map[string]any, keys ...string) string {
 	return ""
 }
 
-func truncate(s string, max int) string {
+func Truncate(s string, max int) string {
 	if max <= 0 || len(s) <= max {
 		return s
 	}
@@ -26,7 +26,7 @@ func truncate(s string, max int) string {
 	return string(r[:max]) + "\n... (truncated)"
 }
 
-func extractJSONArray(text string) string {
+func ExtractJSONArray(text string) string {
 	start := strings.Index(text, "[")
 	end := strings.LastIndex(text, "]")
 	if start < 0 || end < 0 || end < start {
@@ -35,7 +35,7 @@ func extractJSONArray(text string) string {
 	return text[start : end+1]
 }
 
-func textFromMessages(messages []*schema.Message, maxChars int) string {
+func TextFromMessages(messages []*schema.Message, maxChars int) string {
 	var parts []string
 	for _, msg := range messages {
 		if msg.Content == "" {
@@ -43,5 +43,5 @@ func textFromMessages(messages []*schema.Message, maxChars int) string {
 		}
 		parts = append(parts, string(msg.Role)+": "+msg.Content)
 	}
-	return truncate(strings.Join(parts, "\n"), maxChars)
+	return Truncate(strings.Join(parts, "\n"), maxChars)
 }

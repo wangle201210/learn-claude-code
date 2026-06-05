@@ -1,4 +1,4 @@
-package main
+package mcptools
 
 import (
 	"context"
@@ -25,7 +25,7 @@ type mcpServerConfig struct {
 	Headers map[string]string `json:"headers,omitempty"`
 }
 
-func loadMCPTools(ctx context.Context) ([]tool.BaseTool, error) {
+func Load(ctx context.Context) ([]tool.BaseTool, error) {
 	configs, err := readMCPConfigs()
 	if err != nil {
 		return nil, err

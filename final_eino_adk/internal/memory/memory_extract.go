@@ -1,4 +1,4 @@
-package main
+package memory
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/textutil"
 )
 
 const consolidateThreshold = 10
@@ -22,7 +23,7 @@ type memoryItem struct {
 }
 
 func extractMemories(ctx context.Context, m model.BaseChatModel, messages []*schema.Message) {
-	dialogue := textFromMessages(tailMessages(messages, 10), 4000)
+	dialogue := textutil.TextFromMessages(tailMessages(messages, 10), 4000)
 	if strings.TrimSpace(dialogue) == "" {
 		return
 	}
@@ -50,7 +51,7 @@ func extractMemories(ctx context.Context, m model.BaseChatModel, messages []*sch
 	if err != nil {
 		return
 	}
-	arr := extractJSONArray(resp.Content)
+	arr := textutil.ExtractJSONArray(resp.Content)
 	if arr == "" {
 		return
 	}
@@ -82,13 +83,13 @@ func consolidateMemories(ctx context.Context, m model.BaseChatModel) {
 	}
 	prompt := "Consolidate the following memory files. Merge duplicates, remove outdated memories, " +
 		"and preserve important user preferences. Return a JSON array. " +
-		"Each item: {name, type, description, body}.\n\n" + truncate(catalog.String(), 16000)
+		"Each item: {name, type, description, body}.\n\n" + textutil.Truncate(catalog.String(), 16000)
 
 	resp, err := m.Generate(ctx, []*schema.Message{schema.UserMessage(prompt)})
 	if err != nil {
 		return
 	}
-	arr := extractJSONArray(resp.Content)
+	arr := textutil.ExtractJSONArray(resp.Content)
 	if arr == "" {
 		return
 	}

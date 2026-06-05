@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"fmt"
@@ -7,25 +7,26 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
+	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/textutil"
 )
 
-type runLogger struct {
+type RunLogger struct {
 	activeTools map[string]time.Time
 	lastAgent   string
 }
 
-func newRunLogger() *runLogger {
-	return &runLogger{activeTools: map[string]time.Time{}}
+func NewRunLogger() *RunLogger {
+	return &RunLogger{activeTools: map[string]time.Time{}}
 }
 
-func (l *runLogger) log(message string) {
+func (l *RunLogger) Log(message string) {
 	fmt.Printf("\n\033[90m[%s] %s\033[0m\n", time.Now().Format("15:04:05"), message)
 }
 
-func (l *runLogger) handleEvent(event *adk.AgentEvent) error {
+func (l *RunLogger) HandleEvent(event *adk.AgentEvent) error {
 	if event.AgentName != "" && event.AgentName != l.lastAgent {
 		l.lastAgent = event.AgentName
-		l.log("进入 agent: " + event.AgentName)
+		l.Log("进入 agent: " + event.AgentName)
 	}
 	l.logAction(event.Action)
 
@@ -58,23 +59,23 @@ func (l *runLogger) handleEvent(event *adk.AgentEvent) error {
 	return nil
 }
 
-func (l *runLogger) logAction(action *adk.AgentAction) {
+func (l *RunLogger) logAction(action *adk.AgentAction) {
 	if action == nil {
 		return
 	}
 	switch {
 	case action.TransferToAgent != nil:
-		l.log("转交给 agent: " + action.TransferToAgent.DestAgentName)
+		l.Log("转交给 agent: " + action.TransferToAgent.DestAgentName)
 	case action.Interrupted != nil:
-		l.log("执行被中断，等待恢复")
+		l.Log("执行被中断，等待恢复")
 	case action.BreakLoop != nil:
-		l.log("循环 agent 请求结束当前循环")
+		l.Log("循环 agent 请求结束当前循环")
 	case action.Exit:
-		l.log("agent 请求退出")
+		l.Log("agent 请求退出")
 	}
 }
 
-func (l *runLogger) logToolStart(call schema.ToolCall) {
+func (l *RunLogger) logToolStart(call schema.ToolCall) {
 	name := call.Function.Name
 	if name == "" {
 		name = "unknown"
@@ -82,10 +83,10 @@ func (l *runLogger) logToolStart(call schema.ToolCall) {
 	if call.ID != "" {
 		l.activeTools[call.ID] = time.Now()
 	}
-	l.log(fmt.Sprintf("调用工具 %s %s", name, summarizeToolArguments(call.Function.Arguments)))
+	l.Log(fmt.Sprintf("调用工具 %s %s", name, summarizeToolArguments(call.Function.Arguments)))
 }
 
-func (l *runLogger) logToolDone(name, callID, content string) {
+func (l *RunLogger) logToolDone(name, callID, content string) {
 	if name == "" {
 		name = "unknown"
 	}
@@ -94,7 +95,7 @@ func (l *runLogger) logToolDone(name, callID, content string) {
 		duration = "，耗时 " + time.Since(start).Round(time.Millisecond).String()
 		delete(l.activeTools, callID)
 	}
-	l.log(fmt.Sprintf("工具完成 %s%s，输出 %d 字符%s", name, duration, len(content), summarizeToolResult(content)))
+	l.Log(fmt.Sprintf("工具完成 %s%s，输出 %d 字符%s", name, duration, len(content), summarizeToolResult(content)))
 }
 
 func summarizeToolArguments(args string) string {
@@ -102,7 +103,7 @@ func summarizeToolArguments(args string) string {
 	if args == "" || args == "{}" {
 		return ""
 	}
-	return "参数: " + oneLine(truncate(args, 180))
+	return "参数: " + oneLine(textutil.Truncate(args, 180))
 }
 
 func summarizeToolResult(content string) string {
@@ -110,7 +111,7 @@ func summarizeToolResult(content string) string {
 	if content == "" {
 		return ""
 	}
-	return "，摘要: " + oneLine(truncate(content, 160))
+	return "，摘要: " + oneLine(textutil.Truncate(content, 160))
 }
 
 func oneLine(s string) string {

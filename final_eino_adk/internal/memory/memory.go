@@ -1,4 +1,4 @@
-package main
+package memory
 
 import (
 	"context"
@@ -7,10 +7,11 @@ import (
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/workspace"
 )
 
 var (
-	memoryDir   = filepath.Join(workdir, ".memory")
+	memoryDir   = filepath.Join(workspace.Dir(), ".memory")
 	memoryIndex = filepath.Join(memoryDir, "MEMORY.md")
 )
 
@@ -19,7 +20,7 @@ type memoryMiddleware struct {
 	model model.BaseChatModel
 }
 
-func newMemoryMiddleware(m model.BaseChatModel) adk.ChatModelAgentMiddleware {
+func NewMiddleware(m model.BaseChatModel) adk.ChatModelAgentMiddleware {
 	return &memoryMiddleware{
 		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
 		model:                        m,

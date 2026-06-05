@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/cloudwego/eino/adk"
+	agentapp "github.com/wangle201210/learn-claude-code/final_eino_adk/internal/agent"
+	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/cli"
 )
 
 var stdin = bufio.NewReader(os.Stdin)
@@ -41,7 +43,7 @@ func main() {
 		panic(err)
 	}
 
-	agent, err := BuildAgent(ctx, primary, fallback)
+	agent, runtimeState, err := agentapp.Build(ctx, primary, fallback, readLine)
 	if err != nil {
 		panic(err)
 	}
@@ -69,7 +71,7 @@ func main() {
 		if query == "q" || query == "exit" {
 			break
 		}
-		notifications := collectRuntimeNotifications()
+		notifications := runtimeState.CollectNotifications()
 		if query == "" && len(notifications) == 0 {
 			break
 		}
@@ -77,8 +79,8 @@ func main() {
 			query = strings.Join(notifications, "\n\n") + "\n\n" + query
 		}
 
-		logger := newRunLogger()
-		logger.log("开始处理请求")
+		logger := cli.NewRunLogger()
+		logger.Log("开始处理请求")
 
 		// runner.Query 内部把字符串包成 user message 再调 Run；返回流式事件迭代器。
 		iter := runner.Query(ctx, query)
@@ -88,11 +90,11 @@ func main() {
 				break
 			}
 			if event.Err != nil {
-				logger.log("执行出错")
+				logger.Log("执行出错")
 				fmt.Printf("\033[31m%v\033[0m\n", event.Err)
 				break
 			}
-			if err := logger.handleEvent(event); err != nil {
+			if err := logger.HandleEvent(event); err != nil {
 				fmt.Printf("\033[31m%v\033[0m\n", err)
 				break
 			}

@@ -1,4 +1,4 @@
-package main
+package runtime
 
 import (
 	"context"
@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/workspace"
 )
 
 type worktreeNameArgs struct {
@@ -27,8 +29,8 @@ type removeWorktreeArgs struct {
 	Force bool   `json:"force,omitempty" jsonschema_description:"Remove even if the worktree has local changes"`
 }
 
-func createWorktree(ctx context.Context, input *createWorktreeArgs) (string, error) {
-	name, path, err := worktreePath(input.Name)
+func (r *Runtime) createWorktree(ctx context.Context, input *createWorktreeArgs) (string, error) {
+	name, path, err := r.worktreePath(input.Name)
 	if err != nil {
 		return "", err
 	}
@@ -43,15 +45,15 @@ func createWorktree(ctx context.Context, input *createWorktreeArgs) (string, err
 	if _, err := os.Stat(path); err == nil {
 		return "", fmt.Errorf("worktree already exists: %s", path)
 	}
-	output, err := runGit(ctx, "worktree", "add", "-b", branch, path, base)
+	output, err := r.runGit(ctx, "worktree", "add", "-b", branch, path, base)
 	if err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("Created worktree %s at %s.\n%s", name, path, strings.TrimSpace(output)), nil
 }
 
-func removeWorktree(ctx context.Context, input *removeWorktreeArgs) (string, error) {
-	name, path, err := worktreePath(input.Name)
+func (r *Runtime) removeWorktree(ctx context.Context, input *removeWorktreeArgs) (string, error) {
+	name, path, err := r.worktreePath(input.Name)
 	if err != nil {
 		return "", err
 	}
@@ -59,7 +61,7 @@ func removeWorktree(ctx context.Context, input *removeWorktreeArgs) (string, err
 		return "", err
 	}
 	if !input.Force {
-		status, err := runGit(ctx, "-C", path, "status", "--porcelain")
+		status, err := r.runGit(ctx, "-C", path, "status", "--porcelain")
 		if err != nil {
 			return "", err
 		}
@@ -71,22 +73,22 @@ func removeWorktree(ctx context.Context, input *removeWorktreeArgs) (string, err
 	if input.Force {
 		args = append(args, "--force")
 	}
-	output, err := runGit(ctx, args...)
+	output, err := r.runGit(ctx, args...)
 	if err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("Removed worktree %s.\n%s", name, strings.TrimSpace(output)), nil
 }
 
-func keepWorktree(name string) (string, error) {
-	name, path, err := worktreePath(name)
+func (r *Runtime) keepWorktree(name string) (string, error) {
+	name, path, err := r.worktreePath(name)
 	if err != nil {
 		return "", err
 	}
 	if _, err := os.Stat(path); err != nil {
 		return "", err
 	}
-	keptFile := filepath.Join(workdir, ".worktrees", ".kept.jsonl")
+	keptFile := filepath.Join(r.workdir, ".worktrees", ".kept.jsonl")
 	msg := map[string]string{
 		"name": name,
 		"path": path,
@@ -107,24 +109,24 @@ func keepWorktree(name string) (string, error) {
 	return fmt.Sprintf("Kept worktree %s at %s.", name, path), nil
 }
 
-func worktreePath(name string) (string, string, error) {
+func (r *Runtime) worktreePath(name string) (string, string, error) {
 	name, err := validateMailboxName(name)
 	if err != nil {
 		return "", "", err
 	}
-	path, err := safePath(filepath.Join(".worktrees", name))
+	path, err := workspace.SafePath(filepath.Join(".worktrees", name))
 	if err != nil {
 		return "", "", err
 	}
 	return name, path, nil
 }
 
-func runGit(ctx context.Context, args ...string) (string, error) {
+func (r *Runtime) runGit(ctx context.Context, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = workdir
+	cmd.Dir = r.workdir
 	out, err := cmd.CombinedOutput()
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return "", errors.New("git command timed out")

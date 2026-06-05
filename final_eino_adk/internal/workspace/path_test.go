@@ -1,4 +1,4 @@
-package main
+package workspace
 
 import (
 	"os"
@@ -14,14 +14,14 @@ func TestSafePathRemapsWorkspaceAlias(t *testing.T) {
 	workdir = filepath.Join(root, "owner", "learn-claude-code")
 
 	alias := filepath.Join(root, "learn-claude-code", "final_eino_adk")
-	got, err := safePath(alias)
+	got, err := SafePath(alias)
 	if err != nil {
-		t.Fatalf("safePath(%q) returned error: %v", alias, err)
+		t.Fatalf("SafePath(%q) returned error: %v", alias, err)
 	}
 
 	want := filepath.Join(workdir, "final_eino_adk")
 	if got != want {
-		t.Fatalf("safePath(%q) = %q, want %q", alias, got, want)
+		t.Fatalf("SafePath(%q) = %q, want %q", alias, got, want)
 	}
 }
 
@@ -32,9 +32,9 @@ func TestSafePathRejectsUnrelatedAbsolutePath(t *testing.T) {
 	root := t.TempDir()
 	workdir = filepath.Join(root, "owner", "learn-claude-code")
 
-	_, err := safePath(filepath.Join(root, "other-repo"))
+	_, err := SafePath(filepath.Join(root, "other-repo"))
 	if err == nil {
-		t.Fatal("safePath accepted unrelated absolute path")
+		t.Fatal("SafePath accepted unrelated absolute path")
 	}
 }
 

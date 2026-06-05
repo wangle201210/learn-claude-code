@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"context"
@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/cloudwego/eino-ext/adk/backend/local"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/middlewares/agentsmd"
 	"github.com/cloudwego/eino/adk/middlewares/filesystem"
@@ -21,9 +20,14 @@ import (
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
+	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/mcptools"
+	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/memory"
+	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/permission"
+	agentruntime "github.com/wangle201210/learn-claude-code/final_eino_adk/internal/runtime"
+	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/workspace"
 )
 
-// BuildAgent 装配最终版 agent：
+// Build 装配最终版 agent：
 //   - 模型层：传入 primary（必需）+ fallback（可为 nil）；
 //   - Retry：框架内置（指数退避+jitter），默认 3 次；
 //   - Failover：fallback 非 nil 时自动开启，在 429/529/overloaded 错误上切换。
@@ -31,25 +35,23 @@ import (
 //     filesystem / plantask / skill 覆盖前面章节的大部分 harness 能力。
 //
 // 它替代了前 19 章手写的 agent loop、工具分发、s11 错误恢复等。
-func BuildAgent(ctx context.Context, primary, fallback model.ToolCallingChatModel) (*adk.ChatModelAgent, error) {
+func Build(ctx context.Context, primary, fallback model.ToolCallingChatModel, prompt permission.PromptFunc) (*adk.ChatModelAgent, *agentruntime.Runtime, error) {
 	cwd, _ := os.Getwd()
+	root := workspace.Dir()
 
-	localBackend, err := local.NewBackend(ctx, &local.Config{
-		ValidateCommand: func(command string) error {
-			if reason := checkDenyList(command); reason != "" {
-				return errors.New(reason)
-			}
-			return nil
-		},
+	workspaceBackend, err := workspace.New(ctx, func(command string) error {
+		if reason := permission.CheckDenyList(command); reason != "" {
+			return errors.New(reason)
+		}
+		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	workspace := &workspaceBackend{Backend: localBackend, shell: localBackend}
 
 	patchMW, err := patchtoolcalls.New(ctx, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	summaryMW, err := summarization.New(ctx, &summarization.Config{
 		Model: primary,
@@ -57,93 +59,94 @@ func BuildAgent(ctx context.Context, primary, fallback model.ToolCallingChatMode
 			ContextTokens:   50000,
 			ContextMessages: 80,
 		},
-		TranscriptFilePath: filepath.Join(workdir, ".transcripts", "latest-summary-source.jsonl"),
+		TranscriptFilePath: filepath.Join(root, ".transcripts", "latest-summary-source.jsonl"),
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	reductionMW, err := reduction.New(ctx, &reduction.Config{
-		Backend:                   workspace,
-		RootDir:                   filepath.Join(workdir, ".task_outputs", "tool-results"),
+		Backend:                   workspaceBackend,
+		RootDir:                   filepath.Join(root, ".task_outputs", "tool-results"),
 		MaxLengthForTrunc:         50000,
 		MaxTokensForClear:         50000,
 		ClearRetentionSuffixLimit: 6,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	filesystemMW, err := filesystem.New(ctx, &filesystem.MiddlewareConfig{
-		Backend:           workspace,
-		Shell:             workspace,
+		Backend:           workspaceBackend,
+		Shell:             workspaceBackend,
 		UseMultiModalRead: false,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	taskMW, err := plantask.New(ctx, &plantask.Config{
-		Backend: &taskBackend{backend: workspace},
-		BaseDir: filepath.Join(workdir, ".tasks"),
+		Backend: workspace.NewTaskBackend(workspaceBackend),
+		BaseDir: filepath.Join(root, ".tasks"),
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	handlers := []adk.ChatModelAgentMiddleware{
 		patchMW,
-		newPermissionMiddleware(),
+		permission.New(prompt),
 		summaryMW,
 		reductionMW,
 		filesystemMW,
 		taskMW,
-		newMemoryMiddleware(primary),
+		memory.NewMiddleware(primary),
 	}
 
-	if _, err := os.Stat(filepath.Join(workdir, "CLAUDE.md")); err == nil {
+	if _, err := os.Stat(filepath.Join(root, "CLAUDE.md")); err == nil {
 		agentsMW, err := agentsmd.New(ctx, &agentsmd.Config{
-			Backend:             workspace,
-			AgentsMDFiles:       []string{filepath.Join(workdir, "CLAUDE.md")},
+			Backend:             workspaceBackend,
+			AgentsMDFiles:       []string{filepath.Join(root, "CLAUDE.md")},
 			AllAgentsMDMaxBytes: 100000,
 		})
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		handlers = append([]adk.ChatModelAgentMiddleware{handlers[0], agentsMW}, handlers[1:]...)
 	}
 
-	if _, err := os.Stat(filepath.Join(workdir, "skills")); err == nil {
+	if _, err := os.Stat(filepath.Join(root, "skills")); err == nil {
 		skillBackend, err := skill.NewBackendFromFilesystem(ctx, &skill.BackendFromFilesystemConfig{
-			Backend: workspace,
-			BaseDir: filepath.Join(workdir, "skills"),
+			Backend: workspaceBackend,
+			BaseDir: filepath.Join(root, "skills"),
 		})
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		skillMW, err := skill.NewMiddleware(ctx, &skill.Config{
 			Backend: skillBackend,
 		})
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		handlers = append(handlers, skillMW)
 	}
 
-	runtimeState.start(ctx)
+	runtimeState := agentruntime.New(root)
+	runtimeState.Start(ctx)
 
 	var extraTools []tool.BaseTool
-	agentTools, err := buildAgentTools(ctx, primary, workspace)
+	agentTools, err := buildAgentTools(ctx, primary, workspaceBackend, prompt)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	extraTools = append(extraTools, agentTools...)
 
-	runtimeTools, err := buildRuntimeTools(ctx, workspace)
+	runtimeTools, err := runtimeState.BuildTools(ctx, workspaceBackend)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	extraTools = append(extraTools, runtimeTools...)
 
-	mcpTools, err := loadMCPTools(ctx)
+	mcpTools, err := mcptools.Load(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	extraTools = append(extraTools, mcpTools...)
 
@@ -202,5 +205,9 @@ func BuildAgent(ctx context.Context, primary, fallback model.ToolCallingChatMode
 		}
 	}
 
-	return adk.NewChatModelAgent(ctx, cfg)
+	agent, err := adk.NewChatModelAgent(ctx, cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	return agent, runtimeState, nil
 }

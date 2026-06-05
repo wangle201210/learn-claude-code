@@ -1,4 +1,4 @@
-package main
+package runtime
 
 import (
 	"encoding/json"
@@ -21,7 +21,7 @@ type mailboxMessage struct {
 	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
-func (r *agentRuntime) appendMessage(msg mailboxMessage) error {
+func (r *Runtime) appendMessage(msg mailboxMessage) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -37,7 +37,7 @@ func (r *agentRuntime) appendMessage(msg mailboxMessage) error {
 	return json.NewEncoder(f).Encode(msg)
 }
 
-func (r *agentRuntime) readMailbox(name string) ([]mailboxMessage, error) {
+func (r *Runtime) readMailbox(name string) ([]mailboxMessage, error) {
 	data, err := os.ReadFile(filepath.Join(r.mailboxDir, name+".jsonl"))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -58,7 +58,7 @@ func (r *agentRuntime) readMailbox(name string) ([]mailboxMessage, error) {
 	return msgs, nil
 }
 
-func (r *agentRuntime) collectMainInbox() []string {
+func (r *Runtime) collectMainInbox() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -87,7 +87,7 @@ func (r *agentRuntime) collectMainInbox() []string {
 	return notes
 }
 
-func (r *agentRuntime) currentMailboxSize(name string) int64 {
+func (r *Runtime) currentMailboxSize(name string) int64 {
 	path := filepath.Join(r.mailboxDir, name+".jsonl")
 	info, err := os.Stat(path)
 	if err != nil {
