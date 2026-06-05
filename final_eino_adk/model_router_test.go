@@ -109,6 +109,20 @@ func TestModelRouterKeepsEverydayPlanningSimple(t *testing.T) {
 	}
 }
 
+func TestModelRouterKeepsEverydayVerificationSimple(t *testing.T) {
+	decision := classifyModelRoute([]*schema.Message{schema.UserMessage("帮我核实一下明天上海天气")})
+	if decision.tier != modelRouteSimple {
+		t.Fatalf("tier = %s, want simple (%s)", decision.tier, decision.reason)
+	}
+}
+
+func TestModelRouterClassifiesProjectCompletenessAuditAsComplex(t *testing.T) {
+	decision := classifyModelRoute([]*schema.Message{schema.UserMessage("核实 final_eino_adk 是否完整实现 s1-s19 里面提到的功能")})
+	if decision.tier != modelRouteComplex {
+		t.Fatalf("tier = %s, want complex (%s)", decision.tier, decision.reason)
+	}
+}
+
 func TestModelRouterClassifiesToolTrafficAsStandard(t *testing.T) {
 	decision := classifyModelRoute([]*schema.Message{
 		schema.UserMessage("what happened"),

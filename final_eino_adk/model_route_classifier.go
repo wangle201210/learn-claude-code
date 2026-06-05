@@ -157,6 +157,9 @@ var complexPromptKeywords = []string{
 	"regression",
 	"root cause",
 	"race condition",
+	"feature parity",
+	"complete coverage",
+	"full implementation",
 	"deadlock",
 	"leak",
 	"调试",
@@ -174,6 +177,9 @@ var complexPromptKeywords = []string{
 	"回归",
 	"根因",
 	"竞态",
+	"完整实现",
+	"功能完整性",
+	"全量对齐",
 	"死锁",
 	"泄漏",
 }
@@ -208,6 +214,10 @@ var planningPromptKeywords = []string{
 	"评审",
 	"审查",
 	"审核",
+	"检查",
+	"核实",
+	"验证",
+	"确认",
 	"评估",
 	"对比",
 	"取舍",
@@ -298,10 +308,6 @@ var standardPromptKeywords = []string{
 	"项目",
 	"仓库",
 	"功能",
-	"核实",
-	"检查",
-	"对比",
-	"参考",
 }
 
 func looksLikeCodeOrPath(text string) bool {
