@@ -11,7 +11,7 @@ type compactArgs struct {
 	Focus string `json:"focus,omitempty" jsonschema_description:"Optional focus for what the compacted history should preserve"`
 }
 
-func buildCompactTool(controller *compactController) (tool.BaseTool, error) {
+func buildCompactTool(controller *CompactController) (tool.BaseTool, error) {
 	return utils.InferTool[*compactArgs, string]("compact", "Compact earlier conversation history so the next model call has more context budget.", func(ctx context.Context, input *compactArgs) (string, error) {
 		controller.Request()
 		if input != nil && input.Focus != "" {

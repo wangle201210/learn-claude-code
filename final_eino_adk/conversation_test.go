@@ -62,6 +62,18 @@ func TestConversationHistoryReplaceSkipsFallbackCommit(t *testing.T) {
 	assertMessage(t, nextInput[2], schema.User, "second")
 }
 
+func TestConversationHistoryFallbackAllowsNilUserMessage(t *testing.T) {
+	history := &conversationHistory{}
+	history.commitFallback(nil, []*schema.Message{schema.AssistantMessage("compact complete", nil)})
+
+	nextInput, _ := history.nextInput("second")
+	if len(nextInput) != 2 {
+		t.Fatalf("next input length = %d, want assistant + second user", len(nextInput))
+	}
+	assertMessage(t, nextInput[0], schema.Assistant, "compact complete")
+	assertMessage(t, nextInput[1], schema.User, "second")
+}
+
 func assertMessage(t *testing.T, msg *schema.Message, role schema.RoleType, content string) {
 	t.Helper()
 	if msg.Role != role || msg.Content != content {

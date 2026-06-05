@@ -11,36 +11,51 @@ import (
 
 type HistoryRecorder func([]adk.Message)
 
-type compactController struct {
+const compactControlExtraKey = "final_eino_compact_control"
+
+type CompactController struct {
 	mu       sync.Mutex
-	requests int
+	requests []compactRequest
 }
 
-func (c *compactController) Request() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.requests++
+type compactRequest struct {
+	afterSummaryPrompt string
 }
 
-func (c *compactController) Consume() bool {
+func NewCompactController() *CompactController {
+	return &CompactController{}
+}
+
+func (c *CompactController) Request() {
+	c.RequestWithPrompt("")
+}
+
+func (c *CompactController) RequestWithPrompt(afterSummaryPrompt string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.requests == 0 {
-		return false
+	c.requests = append(c.requests, compactRequest{afterSummaryPrompt: afterSummaryPrompt})
+}
+
+func (c *CompactController) consume() (compactRequest, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.requests) == 0 {
+		return compactRequest{}, false
 	}
-	c.requests--
-	return true
+	req := c.requests[0]
+	c.requests = c.requests[1:]
+	return req, true
 }
 
 type compactMiddleware struct {
 	*adk.BaseChatModelAgentMiddleware
-	controller *compactController
+	controller *CompactController
 	summarizer interface {
 		Summarize(context.Context, *adk.ChatModelAgentState) ([]adk.Message, error)
 	}
 }
 
-func newCompactMiddleware(controller *compactController, summaryMW adk.ChatModelAgentMiddleware) adk.ChatModelAgentMiddleware {
+func newCompactMiddleware(controller *CompactController, summaryMW adk.ChatModelAgentMiddleware) adk.ChatModelAgentMiddleware {
 	summarizer, _ := summaryMW.(interface {
 		Summarize(context.Context, *adk.ChatModelAgentState) ([]adk.Message, error)
 	})
@@ -52,7 +67,11 @@ func newCompactMiddleware(controller *compactController, summaryMW adk.ChatModel
 }
 
 func (m *compactMiddleware) BeforeModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState, mc *adk.ModelContext) (context.Context, *adk.ChatModelAgentState, error) {
-	if m.controller == nil || !m.controller.Consume() {
+	if m.controller == nil {
+		return ctx, state, nil
+	}
+	request, ok := m.controller.consume()
+	if !ok {
 		return ctx, state, nil
 	}
 	if m.summarizer == nil {
@@ -64,6 +83,9 @@ func (m *compactMiddleware) BeforeModelRewriteState(ctx context.Context, state *
 	}
 	next := *state
 	next.Messages = finalMessages
+	if request.afterSummaryPrompt != "" {
+		next.Messages = append(next.Messages, compactControlMessage(request.afterSummaryPrompt))
+	}
 	fmt.Println("\n\033[90m[compact] history summarized\033[0m")
 	return ctx, &next, nil
 }
@@ -92,15 +114,38 @@ func copyHistoryMessages(messages []adk.Message) []adk.Message {
 		return nil
 	}
 	out := make([]adk.Message, 0, len(messages))
+	skipCompactConfirmation := false
 	for _, msg := range messages {
-		if msg != nil && msg.Extra != nil {
-			if _, ok := msg.Extra["final_eino_memory_context"]; ok {
+		if hasMessageExtra(msg, "final_eino_memory_context") {
+			continue
+		}
+		if hasMessageExtra(msg, compactControlExtraKey) {
+			skipCompactConfirmation = true
+			continue
+		}
+		if skipCompactConfirmation {
+			skipCompactConfirmation = false
+			if msg != nil && msg.Role == schema.Assistant && len(msg.ToolCalls) == 0 {
 				continue
 			}
 		}
 		out = append(out, cloneMessage(msg))
 	}
 	return out
+}
+
+func compactControlMessage(content string) adk.Message {
+	msg := schema.UserMessage(content)
+	msg.Extra = map[string]any{compactControlExtraKey: true}
+	return msg
+}
+
+func hasMessageExtra(msg adk.Message, key string) bool {
+	if msg == nil || msg.Extra == nil {
+		return false
+	}
+	_, ok := msg.Extra[key]
+	return ok
 }
 
 func cloneMessage(msg adk.Message) adk.Message {

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/middlewares/summarization"
 	"github.com/cloudwego/eino/schema"
 	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/textutil"
 )
@@ -63,6 +64,7 @@ func (l *RunLogger) logAction(action *adk.AgentAction) {
 	if action == nil {
 		return
 	}
+	l.logCustomizedAction(action.CustomizedAction)
 	switch {
 	case action.TransferToAgent != nil:
 		l.Log("转交给 agent: " + action.TransferToAgent.DestAgentName)
@@ -72,6 +74,44 @@ func (l *RunLogger) logAction(action *adk.AgentAction) {
 		l.Log("循环 agent 请求结束当前循环")
 	case action.Exit:
 		l.Log("agent 请求退出")
+	}
+}
+
+func (l *RunLogger) logCustomizedAction(action any) {
+	summaryAction, ok := action.(*summarization.CustomizedAction)
+	if !ok || summaryAction == nil {
+		return
+	}
+	switch summaryAction.Type {
+	case summarization.ActionTypeBeforeSummarize:
+		count := 0
+		if summaryAction.Before != nil {
+			count = len(summaryAction.Before.Messages)
+		}
+		l.Log(fmt.Sprintf("开始上下文压缩，原始消息 %d 条", count))
+	case summarization.ActionTypeGenerateSummary:
+		if summaryAction.GenerateSummary == nil {
+			l.Log("正在调用模型生成上下文摘要")
+			return
+		}
+		if err := summaryAction.GenerateSummary.GetError(); err != nil {
+			l.Log(fmt.Sprintf("上下文摘要模型调用失败，phase=%s attempt=%d: %v",
+				summaryAction.GenerateSummary.Phase,
+				summaryAction.GenerateSummary.Attempt,
+				err,
+			))
+			return
+		}
+		l.Log(fmt.Sprintf("上下文摘要模型调用完成，phase=%s attempt=%d",
+			summaryAction.GenerateSummary.Phase,
+			summaryAction.GenerateSummary.Attempt,
+		))
+	case summarization.ActionTypeAfterSummarize:
+		count := 0
+		if summaryAction.After != nil {
+			count = len(summaryAction.After.Messages)
+		}
+		l.Log(fmt.Sprintf("上下文压缩完成，保留消息 %d 条", count))
 	}
 }
 

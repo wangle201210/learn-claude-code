@@ -39,7 +39,9 @@ func (h *conversationHistory) commitFallback(userMessage adk.Message, roundMessa
 		h.replaced = false
 		return
 	}
-	h.messages = append(h.messages, userMessage)
+	if userMessage != nil {
+		h.messages = append(h.messages, userMessage)
+	}
 	h.messages = append(h.messages, roundMessages...)
 }
 

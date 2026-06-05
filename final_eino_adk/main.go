@@ -44,7 +44,8 @@ func main() {
 	}
 
 	history := &conversationHistory{}
-	agent, runtimeState, err := agentapp.Build(ctx, primary, fallback, readLine, history.replace)
+	compactController := agentapp.NewCompactController()
+	agent, runtimeState, err := agentapp.Build(ctx, primary, fallback, readLine, history.replace, compactController)
 	if err != nil {
 		panic(err)
 	}
@@ -59,7 +60,7 @@ func main() {
 	if fallback != nil {
 		fmt.Println("       failover 已启用（OPENAI_FALLBACK_MODEL 触发）")
 	}
-	fmt.Println("输入问题回车发送；q 或 exit 退出。")
+	fmt.Println("输入问题回车发送；/compact 手动压缩上下文；q 或 exit 退出。")
 	fmt.Println()
 
 	for {
@@ -72,6 +73,18 @@ func main() {
 		if query == "q" || query == "exit" {
 			break
 		}
+		if isManualCompact(query) {
+			history.beginRound()
+			input := history.copyMessages()
+			if len(input) == 0 {
+				fmt.Println("\033[90m[compact] 当前没有可压缩的上下文\033[0m")
+				fmt.Println()
+				continue
+			}
+			compactController.RequestWithPrompt("Context compaction is complete. Reply in one short Chinese sentence confirming the conversation history was compacted.")
+			runAgent(ctx, runner, history, input, nil, "手动压缩上下文")
+			continue
+		}
 		notifications := runtimeState.CollectNotifications()
 		if query == "" && len(notifications) == 0 {
 			break
@@ -82,32 +95,45 @@ func main() {
 
 		history.beginRound()
 		input, userMessage := history.nextInput(query)
-		logger := cli.NewRunLogger()
-		logger.Log("开始处理请求")
-
-		// Runner.Query 每次都会新建 ADK run session；这里显式传入历史，保证多轮上下文连续。
-		iter := runner.Run(ctx, input)
-		var roundMessages []adk.Message
-		for {
-			event, ok := iter.Next()
-			if !ok {
-				break
-			}
-			if event.Err != nil {
-				logger.Log("执行出错")
-				fmt.Printf("\033[31m%v\033[0m\n", event.Err)
-				break
-			}
-			msg, err := logger.HandleEvent(event)
-			if err != nil {
-				fmt.Printf("\033[31m%v\033[0m\n", err)
-				break
-			}
-			if msg != nil {
-				roundMessages = append(roundMessages, msg)
-			}
-		}
-		history.commitFallback(userMessage, roundMessages)
-		fmt.Println()
+		runAgent(ctx, runner, history, input, userMessage, "开始处理请求")
 	}
+}
+
+func isManualCompact(query string) bool {
+	switch strings.ToLower(strings.TrimSpace(query)) {
+	case "/compact", "compact":
+		return true
+	default:
+		return false
+	}
+}
+
+func runAgent(ctx context.Context, runner *adk.Runner, history *conversationHistory, input []adk.Message, userMessage adk.Message, startLog string) {
+	logger := cli.NewRunLogger()
+	logger.Log(startLog)
+
+	// Runner.Run 每次都会新建 ADK run session；这里显式传入历史，保证多轮上下文连续。
+	iter := runner.Run(ctx, input)
+	var roundMessages []adk.Message
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil {
+			logger.Log("执行出错")
+			fmt.Printf("\033[31m%v\033[0m\n", event.Err)
+			break
+		}
+		msg, err := logger.HandleEvent(event)
+		if err != nil {
+			fmt.Printf("\033[31m%v\033[0m\n", err)
+			break
+		}
+		if msg != nil {
+			roundMessages = append(roundMessages, msg)
+		}
+	}
+	history.commitFallback(userMessage, roundMessages)
+	fmt.Println()
 }

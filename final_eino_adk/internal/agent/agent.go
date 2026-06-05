@@ -35,9 +35,12 @@ import (
 //     filesystem / plantask / skill 覆盖前面章节的大部分 harness 能力。
 //
 // 它替代了前 19 章手写的 agent loop、工具分发、s11 错误恢复等。
-func Build(ctx context.Context, primary, fallback model.ToolCallingChatModel, prompt permission.PromptFunc, record HistoryRecorder) (*adk.ChatModelAgent, *agentruntime.Runtime, error) {
+func Build(ctx context.Context, primary, fallback model.ToolCallingChatModel, prompt permission.PromptFunc, record HistoryRecorder, compactState *CompactController) (*adk.ChatModelAgent, *agentruntime.Runtime, error) {
 	cwd, _ := os.Getwd()
 	root := workspace.Dir()
+	if compactState == nil {
+		compactState = NewCompactController()
+	}
 
 	workspaceBackend, err := workspace.New(ctx, func(command string) error {
 		if reason := permission.CheckDenyList(command); reason != "" {
@@ -53,13 +56,13 @@ func Build(ctx context.Context, primary, fallback model.ToolCallingChatModel, pr
 	if err != nil {
 		return nil, nil, err
 	}
-	compactState := &compactController{}
 	summaryMW, err := summarization.New(ctx, &summarization.Config{
 		Model: primary,
 		Trigger: &summarization.TriggerCondition{
 			ContextTokens:   50000,
 			ContextMessages: 80,
 		},
+		EmitInternalEvents: true,
 		TranscriptFilePath: filepath.Join(root, ".transcripts", "latest-summary-source.jsonl"),
 	})
 	if err != nil {
