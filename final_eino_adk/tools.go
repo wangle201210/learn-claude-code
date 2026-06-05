@@ -217,7 +217,7 @@ var permissionRules = []permRule{
 		message: "Writing outside workspace",
 	},
 	{
-		tools: []string{"execute", "bash"},
+		tools: []string{"execute", "bash", "background_execute"},
 		check: func(args map[string]any) bool {
 			cmd := firstString(args, "command")
 			return strings.Contains(cmd, "rm ") ||
@@ -225,6 +225,14 @@ var permissionRules = []permRule{
 				strings.Contains(cmd, "chmod 777")
 		},
 		message: "Potentially destructive command",
+	},
+	{
+		tools: []string{"remove_worktree"},
+		check: func(args map[string]any) bool {
+			force, _ := args["force"].(bool)
+			return force
+		},
+		message: "Force-removing a worktree",
 	},
 }
 
@@ -267,7 +275,7 @@ func checkPermission(toolName, rawArgs string) (bool, string) {
 	var args map[string]any
 	_ = json.Unmarshal([]byte(rawArgs), &args)
 
-	if toolName == "execute" || toolName == "bash" {
+	if toolName == "execute" || toolName == "bash" || toolName == "background_execute" {
 		cmd := firstString(args, "command")
 		if reason := checkDenyList(cmd); reason != "" {
 			fmt.Printf("\n\033[31m%s\033[0m\n", reason)

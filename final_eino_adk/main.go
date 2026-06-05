@@ -67,8 +67,15 @@ func main() {
 			break
 		}
 		query := strings.TrimSpace(line)
-		if query == "" || query == "q" || query == "exit" {
+		if query == "q" || query == "exit" {
 			break
+		}
+		notifications := collectRuntimeNotifications()
+		if query == "" && len(notifications) == 0 {
+			break
+		}
+		if len(notifications) > 0 {
+			query = strings.Join(notifications, "\n\n") + "\n\n" + query
 		}
 
 		// runner.Query 内部把字符串包成 user message 再调 Run；返回流式事件迭代器。

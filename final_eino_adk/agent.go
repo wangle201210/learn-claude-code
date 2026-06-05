@@ -18,6 +18,8 @@ import (
 	"github.com/cloudwego/eino/adk/middlewares/skill"
 	"github.com/cloudwego/eino/adk/middlewares/summarization"
 	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -124,17 +126,50 @@ func BuildAgent(ctx context.Context, primary, fallback model.ToolCallingChatMode
 		handlers = append(handlers, skillMW)
 	}
 
+	runtimeState.start(ctx)
+
+	var extraTools []tool.BaseTool
+	agentTools, err := buildAgentTools(ctx, primary, workspace)
+	if err != nil {
+		return nil, err
+	}
+	extraTools = append(extraTools, agentTools...)
+
+	runtimeTools, err := buildRuntimeTools(ctx, workspace)
+	if err != nil {
+		return nil, err
+	}
+	extraTools = append(extraTools, runtimeTools...)
+
+	mcpTools, err := loadMCPTools(ctx)
+	if err != nil {
+		return nil, err
+	}
+	extraTools = append(extraTools, mcpTools...)
+
 	cfg := &adk.ChatModelAgentConfig{
 		Name:        "FinalAgent",
 		Description: "Coding agent (final version using eino abstractions).",
 		Instruction: fmt.Sprintf(
 			"You are a coding agent at %s. Use tools to solve tasks. Act, don't explain. "+
-				"Respect workspace boundaries and ask before risky writes or commands.",
+				"Respect workspace boundaries and ask before risky writes or commands. "+
+				"Use task for isolated subtasks and teammate for bounded peer review or research. "+
+				"Use background_execute for long-running commands and check_notifications/background_status for results. "+
+				"Use schedule_cron/list_crons/cancel_cron for autonomous scheduled prompts. "+
+				"Use send_message/check_inbox/request_plan/review_plan/request_shutdown for protocol coordination. "+
+				"Use create_worktree/remove_worktree/keep_worktree when work should be isolated in a git worktree. "+
+				"MCP tools, when configured through FINAL_EINO_MCP_* env vars, appear as normal tools.",
 			cwd,
 		),
 		Model:         primary,
-		MaxIterations: 20,
+		MaxIterations: 25,
 		Handlers:      handlers,
+		ToolsConfig: adk.ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: extraTools,
+			},
+			EmitInternalEvents: true,
+		},
 
 		// s11 的 429/限流退避手写代码 ~100 行，被这一段配置取代。
 		// BackoffFunc 为 nil 时框架用默认（指数退避+jitter，100ms→10s）。
