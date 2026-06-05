@@ -8,6 +8,7 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/modelroute"
 	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/recovery"
 )
 
@@ -72,6 +73,16 @@ func TestModelRouterClassifiesSummaryOnlyContextAsStandard(t *testing.T) {
 	decision := classifyModelRoute([]*schema.Message{
 		einoSummaryMessage("Summary says prior context had panic: failed memory compact errors."),
 	})
+	if decision.tier != modelRouteStandard {
+		t.Fatalf("tier = %s, want standard (%s)", decision.tier, decision.reason)
+	}
+}
+
+func TestModelRouterUsesContextTierHint(t *testing.T) {
+	decision := routeDecision(
+		modelroute.WithTier(context.Background(), modelroute.Standard),
+		[]*schema.Message{schema.UserMessage("hello")},
+	)
 	if decision.tier != modelRouteStandard {
 		t.Fatalf("tier = %s, want standard (%s)", decision.tier, decision.reason)
 	}
@@ -363,6 +374,26 @@ func TestModelRouterUsesStandardModelForCodingPrompt(t *testing.T) {
 	}
 }
 
+func TestModelRouterUsesHintedBaseModel(t *testing.T) {
+	base := &captureModel{}
+	routed := newRoutedModel(base, modelRouterConfig{
+		defaultModel:  "complex-model",
+		simpleModel:   "simple-model",
+		standardModel: "standard-model",
+		complexModel:  "complex-model",
+	})
+	hinted := modelroute.WrapBase(routed, modelroute.Standard)
+
+	_, err := hinted.Generate(context.Background(), []*schema.Message{schema.UserMessage("hello")})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := base.lastModel(); got != "standard-model" {
+		t.Fatalf("routed model = %q, want standard-model", got)
+	}
+}
+
 func TestModelRouterUsesComplexModelForHardPrompt(t *testing.T) {
 	base := &captureModel{}
 	routed := newRoutedModel(base, modelRouterConfig{
@@ -436,6 +467,29 @@ func TestModelRouterUsesSimpleModelForCompactConfirmation(t *testing.T) {
 
 	if got := base.lastModel(); got != "simple-model" {
 		t.Fatalf("routed model = %q, want simple-model", got)
+	}
+}
+
+func TestModelRouterKeepsHintedToolCallingModelAfterWithTools(t *testing.T) {
+	base := &captureModel{}
+	routed := newRoutedModel(base, modelRouterConfig{
+		defaultModel:  "complex-model",
+		simpleModel:   "simple-model",
+		standardModel: "standard-model",
+		complexModel:  "complex-model",
+	})
+	hinted, err := modelroute.WrapToolCalling(routed, modelroute.Standard).WithTools([]*schema.ToolInfo{{Name: "read_file"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = hinted.Generate(context.Background(), []*schema.Message{schema.UserMessage("hello")})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := base.lastModel(); got != "standard-model" {
+		t.Fatalf("routed model = %q, want standard-model", got)
 	}
 }
 

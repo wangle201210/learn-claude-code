@@ -7,6 +7,7 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/modelroute"
 )
 
 type modelRouteTier string
@@ -165,7 +166,7 @@ func (m *routedModel) route(ctx context.Context, input []*schema.Message, opts .
 		return modelRouteCall{opts: opts}
 	}
 
-	decision := classifyModelRoute(input)
+	decision := routeDecision(ctx, input)
 	selected := m.cfg.modelForTier(decision.tier)
 	collector, callID := recordModelRoute(ctx, decision.tier, selected)
 	if selected == "" || selected == m.cfg.defaultModel {
@@ -175,6 +176,20 @@ func (m *routedModel) route(ctx context.Context, input []*schema.Message, opts .
 	out = append(out, opts...)
 	out = append(out, model.WithModel(selected))
 	return modelRouteCall{usage: collector, callID: callID, opts: out}
+}
+
+func routeDecision(ctx context.Context, input []*schema.Message) modelRouteDecision {
+	if tier, ok := modelroute.TierFromContext(ctx); ok {
+		switch tier {
+		case modelroute.Simple:
+			return modelRouteDecision{tier: modelRouteSimple, reason: "context hint"}
+		case modelroute.Standard:
+			return modelRouteDecision{tier: modelRouteStandard, reason: "context hint"}
+		case modelroute.Complex:
+			return modelRouteDecision{tier: modelRouteComplex, reason: "context hint"}
+		}
+	}
+	return classifyModelRoute(input)
 }
 
 func firstNonEmptyEnv(keys ...string) string {

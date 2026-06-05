@@ -23,6 +23,7 @@ import (
 	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/hooks"
 	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/mcptools"
 	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/memory"
+	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/modelroute"
 	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/permission"
 	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/recovery"
 	agentruntime "github.com/wangle201210/learn-claude-code/final_eino_adk/internal/runtime"
@@ -60,7 +61,7 @@ func Build(ctx context.Context, primary, fallback model.ToolCallingChatModel, pr
 		return nil, nil, err
 	}
 	summaryMW, err := summarization.New(ctx, &summarization.Config{
-		Model: primary,
+		Model: modelroute.WrapBase(primary, modelroute.Standard),
 		Trigger: &summarization.TriggerCondition{
 			ContextTokens:   50000,
 			ContextMessages: 80,
@@ -143,7 +144,7 @@ func Build(ctx context.Context, primary, fallback model.ToolCallingChatModel, pr
 		filesystemMW,
 		taskMW,
 		todoMW,
-		memory.NewMiddleware(primary),
+		memory.NewMiddleware(modelroute.WrapBase(primary, modelroute.Standard)),
 		newHistoryRecorderMiddleware(record),
 	)
 

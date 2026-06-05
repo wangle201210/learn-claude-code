@@ -10,6 +10,7 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/modelroute"
 	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/textutil"
 )
 
@@ -63,7 +64,7 @@ func extractMemories(ctx context.Context, m model.BaseChatModel, messages []*sch
 		"If nothing new or already covered by existing memories, return [].\n\n" +
 		"Existing memories:\n" + existingDesc + "\n\nDialogue:\n" + dialogue
 
-	resp, err := m.Generate(ctx, []*schema.Message{schema.UserMessage(prompt)})
+	resp, err := m.Generate(modelroute.WithTier(ctx, modelroute.Standard), []*schema.Message{schema.UserMessage(prompt)})
 	if err != nil {
 		return
 	}
@@ -101,7 +102,7 @@ func consolidateMemories(ctx context.Context, m model.BaseChatModel) {
 		"and preserve important user preferences. Return a JSON array. " +
 		"Each item: {name, type, description, body}.\n\n" + textutil.Truncate(catalog.String(), 16000)
 
-	resp, err := m.Generate(ctx, []*schema.Message{schema.UserMessage(prompt)})
+	resp, err := m.Generate(modelroute.WithTier(ctx, modelroute.Standard), []*schema.Message{schema.UserMessage(prompt)})
 	if err != nil {
 		return
 	}
