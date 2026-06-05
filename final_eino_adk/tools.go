@@ -167,7 +167,16 @@ type taskBackend struct {
 }
 
 func (b *taskBackend) LsInfo(ctx context.Context, req *plantask.LsInfoRequest) ([]plantask.FileInfo, error) {
-	return b.backend.LsInfo(ctx, (*adkfs.LsInfoRequest)(req))
+	files, err := b.backend.LsInfo(ctx, (*adkfs.LsInfoRequest)(req))
+	if err != nil {
+		return nil, err
+	}
+	for i := range files {
+		if !filepath.IsAbs(files[i].Path) && filepath.Dir(files[i].Path) == "." {
+			files[i].Path = filepath.Join(req.Path, files[i].Path)
+		}
+	}
+	return files, nil
 }
 
 func (b *taskBackend) Read(ctx context.Context, req *plantask.ReadRequest) (*adkfsmw.FileContent, error) {
