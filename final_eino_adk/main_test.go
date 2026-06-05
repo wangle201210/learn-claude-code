@@ -65,3 +65,34 @@ func TestPrepareQueryKeepsUserInput(t *testing.T) {
 		t.Fatalf("query = %q, want hello", query)
 	}
 }
+
+func TestModelRouterConfigFromEnv(t *testing.T) {
+	t.Setenv("OPENAI_MODEL", "complex")
+	t.Setenv("FINAL_EINO_SIMPLE_MODEL", "simple")
+	t.Setenv("OPENAI_SIMPLE_MODEL", "ignored")
+	t.Setenv("FINAL_EINO_COMPLEX_MODEL", "")
+	t.Setenv("OPENAI_COMPLEX_MODEL", "")
+	t.Setenv("FINAL_EINO_MODEL_ROUTING", "")
+
+	cfg := modelRouterConfigFromEnv()
+	if cfg.simpleModel != "simple" {
+		t.Fatalf("simpleModel = %q, want simple", cfg.simpleModel)
+	}
+	if cfg.complexModel != "complex" {
+		t.Fatalf("complexModel = %q, want complex", cfg.complexModel)
+	}
+	if !cfg.enabled() {
+		t.Fatal("routing should be enabled")
+	}
+}
+
+func TestModelRouterSummaryDisabledWithoutSimpleModel(t *testing.T) {
+	t.Setenv("OPENAI_MODEL", "complex")
+	t.Setenv("FINAL_EINO_SIMPLE_MODEL", "")
+	t.Setenv("OPENAI_SIMPLE_MODEL", "")
+	t.Setenv("ANTHROPIC_SMALL_FAST_MODEL", "")
+
+	if got := modelRoutingSummaryFromEnv(); got != "" {
+		t.Fatalf("summary = %q, want empty", got)
+	}
+}

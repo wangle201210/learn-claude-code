@@ -60,6 +60,9 @@ func main() {
 	if fallback != nil {
 		fmt.Println("       failover 已启用（OPENAI_FALLBACK_MODEL 触发）")
 	}
+	if summary := modelRoutingSummaryFromEnv(); summary != "" {
+		fmt.Println("       " + summary)
+	}
 	fmt.Println("输入问题回车发送；/compact 手动压缩上下文；q 或 exit 退出。")
 	fmt.Println()
 
