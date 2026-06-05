@@ -223,6 +223,32 @@ func TestFinalAgentSpawnTeammateProducesNotification(t *testing.T) {
 	}
 }
 
+func TestFinalAgentRoutesSpawnedTeammateModelCall(t *testing.T) {
+	t.Setenv("FINAL_EINO_TEAMMATE_IDLE_MS", "0")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	fake := newFinalTestModel()
+	fake.enqueueResponses(responseWithToolCall("call-spawn", "spawn_teammate", `{"name":"debugger","role":"debugger","prompt":"debug a race condition in memory compact"}`))
+	routed := newRoutedModel(fake, modelRouterConfig{
+		defaultModel:  "standard-model",
+		simpleModel:   "simple-model",
+		standardModel: "standard-model",
+		complexModel:  "complex-model",
+	})
+	history := &conversationHistory{}
+	compactController := agentapp.NewCompactController()
+	agent, runtimeState, err := agentapp.Build(ctx, routed, nil, denyPrompt, history.replace, compactController)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent})
+
+	runUserTurn(t, ctx, runner, history, "start teammate")
+
+	waitNotifications(t, runtimeState, 3*time.Second, "teammate_result")
+	assertModelsContain(t, fake.modelSelections(), "complex-model")
+}
+
 func TestFinalAgentRoutesModelTiersThroughRealMiddleware(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -706,6 +732,16 @@ func assertModelPrefix(t *testing.T, got []string, want ...string) {
 			t.Fatalf("model selections = %v, want prefix %v", got, want)
 		}
 	}
+}
+
+func assertModelsContain(t *testing.T, got []string, want string) {
+	t.Helper()
+	for _, modelName := range got {
+		if modelName == want {
+			return
+		}
+	}
+	t.Fatalf("model selections = %v, want to contain %q", got, want)
 }
 
 func formatMessages(messages []*schema.Message) string {
