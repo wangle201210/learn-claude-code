@@ -101,10 +101,14 @@ func Build(ctx context.Context, primary, fallback model.ToolCallingChatModel, pr
 		return nil, nil, err
 	}
 	var agentsMW adk.ChatModelAgentMiddleware
-	if _, err := os.Stat(filepath.Join(root, "CLAUDE.md")); err == nil {
+	agentsMDFiles, err := collectAgentInstructionFiles(root, cwd)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(agentsMDFiles) > 0 {
 		agentsMW, err = agentsmd.New(ctx, &agentsmd.Config{
 			Backend:             workspaceBackend,
-			AgentsMDFiles:       []string{filepath.Join(root, "CLAUDE.md")},
+			AgentsMDFiles:       agentsMDFiles,
 			AllAgentsMDMaxBytes: 100000,
 		})
 		if err != nil {
