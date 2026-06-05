@@ -2,14 +2,22 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
+	"github.com/cloudwego/eino-ext/adk/backend/local"
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/middlewares/agentsmd"
+	"github.com/cloudwego/eino/adk/middlewares/filesystem"
+	"github.com/cloudwego/eino/adk/middlewares/patchtoolcalls"
+	"github.com/cloudwego/eino/adk/middlewares/plantask"
+	"github.com/cloudwego/eino/adk/middlewares/reduction"
+	"github.com/cloudwego/eino/adk/middlewares/skill"
+	"github.com/cloudwego/eino/adk/middlewares/summarization"
 	"github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/components/tool"
-	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -17,37 +25,116 @@ import (
 //   - 模型层：传入 primary（必需）+ fallback（可为 nil）；
 //   - Retry：框架内置（指数退避+jitter），默认 3 次；
 //   - Failover：fallback 非 nil 时自动开启，在 429/529/overloaded 错误上切换。
+//   - ADK middlewares：官方 patchtoolcalls / summarization / reduction /
+//     filesystem / plantask / skill 覆盖前面章节的大部分 harness 能力。
 //
 // 它替代了前 19 章手写的 agent loop、工具分发、s11 错误恢复等。
 func BuildAgent(ctx context.Context, primary, fallback model.ToolCallingChatModel) (*adk.ChatModelAgent, error) {
 	cwd, _ := os.Getwd()
 
-	// 4 个工具用 utils.InferTool 从 Go 函数自动推 schema：手写 ParamsOneOf 的活儿消失了。
-	tools := []tool.BaseTool{
-		newBashTool(),
-		newReadTool(),
-		newWriteTool(),
-		newGlobTool(),
+	localBackend, err := local.NewBackend(ctx, &local.Config{
+		ValidateCommand: func(command string) error {
+			if reason := checkDenyList(command); reason != "" {
+				return errors.New(reason)
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		return nil, err
 	}
-	// 接真实 MCP server（例如 stdio 启动的 filesystem/fetch server），把工具并入：
-	//   import "github.com/cloudwego/eino-ext/components/tool/mcp"
-	//   import mcpcli "github.com/mark3labs/mcp-go/client"
-	//   cli, _ := mcpcli.NewStdioMCPClient("npx", nil, "-y", "@modelcontextprotocol/server-filesystem", workdir)
-	//   mcpTools, _ := mcp.GetTools(ctx, &mcp.Config{Cli: cli})
-	//   tools = append(tools, mcpTools...)
+	workspace := &workspaceBackend{Backend: localBackend, shell: localBackend}
+
+	patchMW, err := patchtoolcalls.New(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	summaryMW, err := summarization.New(ctx, &summarization.Config{
+		Model: primary,
+		Trigger: &summarization.TriggerCondition{
+			ContextTokens:   50000,
+			ContextMessages: 80,
+		},
+		TranscriptFilePath: filepath.Join(workdir, ".transcripts", "latest-summary-source.jsonl"),
+	})
+	if err != nil {
+		return nil, err
+	}
+	reductionMW, err := reduction.New(ctx, &reduction.Config{
+		Backend:                   workspace,
+		RootDir:                   filepath.Join(workdir, ".task_outputs", "tool-results"),
+		MaxLengthForTrunc:         50000,
+		MaxTokensForClear:         50000,
+		ClearRetentionSuffixLimit: 6,
+	})
+	if err != nil {
+		return nil, err
+	}
+	filesystemMW, err := filesystem.New(ctx, &filesystem.MiddlewareConfig{
+		Backend:           workspace,
+		Shell:             workspace,
+		UseMultiModalRead: false,
+	})
+	if err != nil {
+		return nil, err
+	}
+	taskMW, err := plantask.New(ctx, &plantask.Config{
+		Backend: &taskBackend{backend: workspace},
+		BaseDir: filepath.Join(workdir, ".tasks"),
+	})
+	if err != nil {
+		return nil, err
+	}
+	handlers := []adk.ChatModelAgentMiddleware{
+		patchMW,
+		newPermissionMiddleware(),
+		summaryMW,
+		reductionMW,
+		filesystemMW,
+		taskMW,
+		newMemoryMiddleware(primary),
+	}
+
+	if _, err := os.Stat(filepath.Join(workdir, "CLAUDE.md")); err == nil {
+		agentsMW, err := agentsmd.New(ctx, &agentsmd.Config{
+			Backend:             workspace,
+			AgentsMDFiles:       []string{filepath.Join(workdir, "CLAUDE.md")},
+			AllAgentsMDMaxBytes: 100000,
+		})
+		if err != nil {
+			return nil, err
+		}
+		handlers = append([]adk.ChatModelAgentMiddleware{handlers[0], agentsMW}, handlers[1:]...)
+	}
+
+	if _, err := os.Stat(filepath.Join(workdir, "skills")); err == nil {
+		skillBackend, err := skill.NewBackendFromFilesystem(ctx, &skill.BackendFromFilesystemConfig{
+			Backend: workspace,
+			BaseDir: filepath.Join(workdir, "skills"),
+		})
+		if err != nil {
+			return nil, err
+		}
+		skillMW, err := skill.NewMiddleware(ctx, &skill.Config{
+			Backend: skillBackend,
+		})
+		if err != nil {
+			return nil, err
+		}
+		handlers = append(handlers, skillMW)
+	}
 
 	cfg := &adk.ChatModelAgentConfig{
 		Name:        "FinalAgent",
 		Description: "Coding agent (final version using eino abstractions).",
 		Instruction: fmt.Sprintf(
-			"You are a coding agent at %s. Use tools to solve tasks. Act, don't explain.",
+			"You are a coding agent at %s. Use tools to solve tasks. Act, don't explain. "+
+				"Respect workspace boundaries and ask before risky writes or commands.",
 			cwd,
 		),
-		Model: primary,
-		ToolsConfig: adk.ToolsConfig{
-			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: tools},
-		},
+		Model:         primary,
 		MaxIterations: 20,
+		Handlers:      handlers,
 
 		// s11 的 429/限流退避手写代码 ~100 行，被这一段配置取代。
 		// BackoffFunc 为 nil 时框架用默认（指数退避+jitter，100ms→10s）。

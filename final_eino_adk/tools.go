@@ -2,26 +2,33 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/cloudwego/eino/adk"
+	adkfs "github.com/cloudwego/eino/adk/filesystem"
+	adkfsmw "github.com/cloudwego/eino/adk/middlewares/filesystem"
+	"github.com/cloudwego/eino/adk/middlewares/plantask"
 	"github.com/cloudwego/eino/components/tool"
-	"github.com/cloudwego/eino/components/tool/utils"
+	"github.com/cloudwego/eino/schema"
 )
 
-// workdir 是 agent 的工作区根目录；文件类工具被限制在其下。
 var workdir, _ = os.Getwd()
 
-// safePath：相对路径 → 拼 workdir；绝对路径 → 直接用；最后 Rel 校验未逃出 workdir。
-// （沿用 s05 修复后的逻辑：绝对路径不和 workdir 拼接，避免 /tmp/x 被悄悄改写成 workdir/tmp/x）
+// safePath keeps all filesystem middleware access under the current workspace.
 func safePath(p string) (string, error) {
+	if strings.TrimSpace(p) == "" {
+		p = "."
+	}
 	joined := p
-	if !filepath.IsAbs(p) {
-		joined = filepath.Join(workdir, p)
+	if !filepath.IsAbs(joined) {
+		joined = filepath.Join(workdir, joined)
 	}
 	abs, err := filepath.Abs(joined)
 	if err != nil {
@@ -34,123 +41,290 @@ func safePath(p string) (string, error) {
 	return abs, nil
 }
 
-// ── bash ────────────────────────────────────────────────────
-
-type bashArgs struct {
-	Command string `json:"command" jsonschema:"required,description=Shell command to run via bash -c"`
+type workspaceBackend struct {
+	adkfs.Backend
+	shell adkfs.Shell
 }
 
-func newBashTool() tool.InvokableTool {
-	t, _ := utils.InferTool("bash", "Run a shell command.",
-		func(ctx context.Context, a *bashArgs) (string, error) {
-			dangerous := []string{"rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if=", "> /dev/sda"}
-			for _, d := range dangerous {
-				if strings.Contains(a.Command, d) {
-					return "", fmt.Errorf("blocked dangerous command containing %q", d)
-				}
-			}
-			ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
-			defer cancel()
-			cmd := exec.CommandContext(ctx, "bash", "-c", a.Command)
-			cmd.Dir = workdir
-			out, _ := cmd.CombinedOutput()
-			if ctx.Err() == context.DeadlineExceeded {
-				return "Error: Timeout (120s)", nil
-			}
-			s := strings.TrimSpace(string(out))
-			if s == "" {
-				return "(no output)", nil
-			}
-			if r := []rune(s); len(r) > 50000 {
-				return string(r[:50000]), nil
-			}
-			return s, nil
-		})
-	return t
+func (b *workspaceBackend) LsInfo(ctx context.Context, req *adkfs.LsInfoRequest) ([]adkfs.FileInfo, error) {
+	p, err := safePath(req.Path)
+	if err != nil {
+		return nil, err
+	}
+	files, err := b.Backend.LsInfo(ctx, &adkfs.LsInfoRequest{Path: p})
+	if err != nil {
+		return nil, err
+	}
+	return files, nil
 }
 
-// ── read_file ───────────────────────────────────────────────
-
-type readFileArgs struct {
-	Path  string `json:"path" jsonschema:"required,description=File path relative to the workspace (or absolute within workspace)"`
-	Limit int    `json:"limit,omitempty" jsonschema:"description=Optional max number of lines to read"`
+func (b *workspaceBackend) Read(ctx context.Context, req *adkfs.ReadRequest) (*adkfs.FileContent, error) {
+	p, err := safePath(req.FilePath)
+	if err != nil {
+		return nil, err
+	}
+	return b.Backend.Read(ctx, &adkfs.ReadRequest{
+		FilePath: p,
+		Offset:   req.Offset,
+		Limit:    req.Limit,
+	})
 }
 
-func newReadTool() tool.InvokableTool {
-	t, _ := utils.InferTool("read_file", "Read file contents.",
-		func(ctx context.Context, a *readFileArgs) (string, error) {
-			p, err := safePath(a.Path)
-			if err != nil {
-				return "", err
-			}
-			data, err := os.ReadFile(p)
-			if err != nil {
-				return "", err
-			}
-			lines := strings.Split(string(data), "\n")
-			if a.Limit > 0 && a.Limit < len(lines) {
-				omitted := len(lines) - a.Limit
-				lines = append(lines[:a.Limit:a.Limit], fmt.Sprintf("... (%d more lines)", omitted))
-			}
-			return strings.Join(lines, "\n"), nil
-		})
-	return t
+func (b *workspaceBackend) GrepRaw(ctx context.Context, req *adkfs.GrepRequest) ([]adkfs.GrepMatch, error) {
+	path := req.Path
+	if path == "" {
+		path = "."
+	}
+	p, err := safePath(path)
+	if err != nil {
+		return nil, err
+	}
+	next := *req
+	next.Path = p
+	matches, err := b.Backend.GrepRaw(ctx, &next)
+	if err != nil {
+		return nil, err
+	}
+	return matches, nil
 }
 
-// ── write_file ──────────────────────────────────────────────
-
-type writeFileArgs struct {
-	Path    string `json:"path" jsonschema:"required,description=File path relative to the workspace"`
-	Content string `json:"content" jsonschema:"required,description=The full content to write"`
+func (b *workspaceBackend) GlobInfo(ctx context.Context, req *adkfs.GlobInfoRequest) ([]adkfs.FileInfo, error) {
+	path := req.Path
+	if path == "" {
+		path = "."
+	}
+	p, err := safePath(path)
+	if err != nil {
+		return nil, err
+	}
+	files, err := b.Backend.GlobInfo(ctx, &adkfs.GlobInfoRequest{
+		Pattern: req.Pattern,
+		Path:    p,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return files, nil
 }
 
-func newWriteTool() tool.InvokableTool {
-	t, _ := utils.InferTool("write_file", "Write content to a file (creates parents).",
-		func(ctx context.Context, a *writeFileArgs) (string, error) {
-			p, err := safePath(a.Path)
-			if err != nil {
-				return "", err
-			}
-			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-				return "", err
-			}
-			if err := os.WriteFile(p, []byte(a.Content), 0o644); err != nil {
-				return "", err
-			}
-			return fmt.Sprintf("Wrote %d bytes to %s", len(a.Content), a.Path), nil
-		})
-	return t
+func (b *workspaceBackend) Write(ctx context.Context, req *adkfs.WriteRequest) error {
+	p, err := safePath(req.FilePath)
+	if err != nil {
+		return err
+	}
+	return b.Backend.Write(ctx, &adkfs.WriteRequest{
+		FilePath: p,
+		Content:  req.Content,
+	})
 }
 
-// ── glob ────────────────────────────────────────────────────
-
-type globArgs struct {
-	Pattern string `json:"pattern" jsonschema:"required,description=Glob pattern e.g. '*.go' or 'sub/*.txt'"`
+func (b *workspaceBackend) Edit(ctx context.Context, req *adkfs.EditRequest) error {
+	p, err := safePath(req.FilePath)
+	if err != nil {
+		return err
+	}
+	return b.Backend.Edit(ctx, &adkfs.EditRequest{
+		FilePath:   p,
+		OldString:  req.OldString,
+		NewString:  req.NewString,
+		ReplaceAll: req.ReplaceAll,
+	})
 }
 
-func newGlobTool() tool.InvokableTool {
-	t, _ := utils.InferTool("glob", "Find files matching a glob pattern.",
-		func(ctx context.Context, a *globArgs) (string, error) {
-			pat := a.Pattern
-			if !filepath.IsAbs(pat) {
-				pat = filepath.Join(workdir, pat)
+func (b *workspaceBackend) MultiModalRead(ctx context.Context, req *adkfs.MultiModalReadRequest) (*adkfs.MultiFileContent, error) {
+	reader, ok := b.Backend.(adkfs.MultiModalReader)
+	if !ok {
+		content, err := b.Read(ctx, &req.ReadRequest)
+		if err != nil {
+			return nil, err
+		}
+		return &adkfs.MultiFileContent{FileContent: content}, nil
+	}
+	p, err := safePath(req.FilePath)
+	if err != nil {
+		return nil, err
+	}
+	next := *req
+	next.FilePath = p
+	return reader.MultiModalRead(ctx, &next)
+}
+
+func (b *workspaceBackend) Execute(ctx context.Context, input *adkfs.ExecuteRequest) (*adkfs.ExecuteResponse, error) {
+	if b.shell == nil {
+		return nil, errors.New("shell is not configured")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+	resp, err := b.shell.Execute(ctx, input)
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return &adkfs.ExecuteResponse{Output: "Error: Timeout (120s)"}, nil
+	}
+	return resp, err
+}
+
+type taskBackend struct {
+	backend *workspaceBackend
+}
+
+func (b *taskBackend) LsInfo(ctx context.Context, req *plantask.LsInfoRequest) ([]plantask.FileInfo, error) {
+	return b.backend.LsInfo(ctx, (*adkfs.LsInfoRequest)(req))
+}
+
+func (b *taskBackend) Read(ctx context.Context, req *plantask.ReadRequest) (*adkfsmw.FileContent, error) {
+	return b.backend.Read(ctx, (*adkfs.ReadRequest)(req))
+}
+
+func (b *taskBackend) Write(ctx context.Context, req *plantask.WriteRequest) error {
+	return b.backend.Write(ctx, (*adkfs.WriteRequest)(req))
+}
+
+func (b *taskBackend) Delete(ctx context.Context, req *plantask.DeleteRequest) error {
+	p, err := safePath(req.FilePath)
+	if err != nil {
+		return err
+	}
+	return os.Remove(p)
+}
+
+var denyList = []string{"rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if=", "> /dev/sda"}
+
+func checkDenyList(command string) string {
+	for _, p := range denyList {
+		if strings.Contains(command, p) {
+			return fmt.Sprintf("blocked dangerous command containing %q", p)
+		}
+	}
+	return ""
+}
+
+type permRule struct {
+	tools   []string
+	check   func(args map[string]any) bool
+	message string
+}
+
+var permissionRules = []permRule{
+	{
+		tools: []string{"write_file", "edit_file"},
+		check: func(args map[string]any) bool {
+			path := firstString(args, "file_path", "path")
+			if path == "" {
+				return false
 			}
-			matches, err := filepath.Glob(pat)
-			if err != nil {
-				return "", err
-			}
-			var results []string
-			for _, m := range matches {
-				rel, err := filepath.Rel(workdir, m)
-				if err != nil || strings.HasPrefix(rel, "..") {
-					continue
-				}
-				results = append(results, rel)
-			}
-			if len(results) == 0 {
-				return "(no matches)", nil
-			}
-			return strings.Join(results, "\n"), nil
-		})
-	return t
+			_, err := safePath(path)
+			return err != nil
+		},
+		message: "Writing outside workspace",
+	},
+	{
+		tools: []string{"execute", "bash"},
+		check: func(args map[string]any) bool {
+			cmd := firstString(args, "command")
+			return strings.Contains(cmd, "rm ") ||
+				strings.Contains(cmd, "> /etc/") ||
+				strings.Contains(cmd, "chmod 777")
+		},
+		message: "Potentially destructive command",
+	},
+}
+
+func firstString(args map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if v, _ := args[key].(string); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func checkRules(toolName string, args map[string]any) string {
+	for _, r := range permissionRules {
+		if slices.Contains(r.tools, toolName) && r.check(args) {
+			return r.message
+		}
+	}
+	return ""
+}
+
+type permissionMiddleware struct {
+	*adk.BaseChatModelAgentMiddleware
+}
+
+func newPermissionMiddleware() adk.ChatModelAgentMiddleware {
+	return &permissionMiddleware{BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{}}
+}
+
+func (m *permissionMiddleware) WrapInvokableToolCall(_ context.Context, endpoint adk.InvokableToolCallEndpoint, tCtx *adk.ToolContext) (adk.InvokableToolCallEndpoint, error) {
+	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+		if allowed, reason := checkPermission(tCtx.Name, argumentsInJSON); !allowed {
+			return "Permission denied: " + reason, nil
+		}
+		return endpoint(ctx, argumentsInJSON, opts...)
+	}, nil
+}
+
+func checkPermission(toolName, rawArgs string) (bool, string) {
+	var args map[string]any
+	_ = json.Unmarshal([]byte(rawArgs), &args)
+
+	if toolName == "execute" || toolName == "bash" {
+		cmd := firstString(args, "command")
+		if reason := checkDenyList(cmd); reason != "" {
+			fmt.Printf("\n\033[31m%s\033[0m\n", reason)
+			return false, reason
+		}
+	}
+
+	if reason := checkRules(toolName, args); reason != "" {
+		if askUser(toolName, rawArgs, reason) == "deny" {
+			return false, reason
+		}
+	}
+	return true, ""
+}
+
+func askUser(toolName, rawArgs, reason string) string {
+	fmt.Printf("\n\033[33m%s\033[0m\n", reason)
+	fmt.Printf("Tool: %s(%s)\n", toolName, rawArgs)
+	line, ok := readLine("Allow? [y/N] ")
+	if !ok {
+		return "deny"
+	}
+	switch strings.ToLower(line) {
+	case "y", "yes":
+		return "allow"
+	default:
+		return "deny"
+	}
+}
+
+func truncate(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "\n... (truncated)"
+}
+
+func extractJSONArray(text string) string {
+	start := strings.Index(text, "[")
+	end := strings.LastIndex(text, "]")
+	if start < 0 || end < 0 || end < start {
+		return ""
+	}
+	return text[start : end+1]
+}
+
+func textFromMessages(messages []*schema.Message, maxChars int) string {
+	var parts []string
+	for _, msg := range messages {
+		if msg.Content == "" {
+			continue
+		}
+		parts = append(parts, string(msg.Role)+": "+msg.Content)
+	}
+	return truncate(strings.Join(parts, "\n"), maxChars)
 }

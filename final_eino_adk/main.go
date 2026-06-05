@@ -11,13 +11,25 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+var stdin = bufio.NewReader(os.Stdin)
+
+func readLine(prompt string) (string, bool) {
+	fmt.Print(prompt)
+	line, err := stdin.ReadString('\n')
+	if err != nil && line == "" {
+		return "", false
+	}
+	return strings.TrimSpace(line), true
+}
+
 // 项目根目录最终版 agent CLI：用 eino adk 抽象替代前 19 章手写的 agent loop。
 // 文件总计 ~320 行（s01-s19 累计手写 3800+ 行）。
 //
 // 启动：
-//   export OPENAI_API_KEY=... OPENAI_MODEL=... OPENAI_BASE_URL=.../v1
-//   # 可选：export OPENAI_FALLBACK_MODEL=...  → 自动启用 Failover
-//   go run .
+//
+//	export OPENAI_API_KEY=... OPENAI_MODEL=... OPENAI_BASE_URL=.../v1
+//	# 可选：export OPENAI_FALLBACK_MODEL=...  → 自动启用 Failover
+//	go run .
 func main() {
 	ctx := context.Background()
 
@@ -48,7 +60,6 @@ func main() {
 	fmt.Println("输入问题回车发送；q 或 exit 退出。")
 	fmt.Println()
 
-	stdin := bufio.NewReader(os.Stdin)
 	for {
 		fmt.Print("\033[36m>> \033[0m")
 		line, err := stdin.ReadString('\n')
