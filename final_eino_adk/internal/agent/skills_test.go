@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	einoskill "github.com/cloudwego/eino/adk/middlewares/skill"
@@ -65,6 +67,108 @@ func TestSkillDirsIncludesClaudeSkills(t *testing.T) {
 	}
 	if dirs[1] != "/repo/.claude/skills" {
 		t.Fatalf("second dir = %q, want /repo/.claude/skills", dirs[1])
+	}
+}
+
+func TestClaudeSkillBackendFiltersModelDisabledSkills(t *testing.T) {
+	ctx := context.Background()
+	base := &testSkillBackend{skills: []einoskill.Skill{
+		{FrontMatter: einoskill.FrontMatter{Name: "safe", Description: "visible"}},
+		{FrontMatter: einoskill.FrontMatter{Name: "dangerous", Description: "hidden"}},
+	}}
+	backend := &claudeSkillBackend{
+		base: base,
+		metadata: map[string]claudeSkillMetadata{
+			"dangerous": {DisableModelInvocation: true},
+		},
+	}
+
+	list, err := backend.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := skillNames(list); got != "safe" {
+		t.Fatalf("skills = %q, want safe", got)
+	}
+	if _, err := backend.Get(ctx, "dangerous"); err == nil {
+		t.Fatal("disabled skill should not be available to model invocation")
+	}
+	if _, err := backend.Get(ctx, "safe"); err != nil {
+		t.Fatalf("safe skill should remain available: %v", err)
+	}
+}
+
+func TestClaudeSkillBackendFiltersConditionalPathSkills(t *testing.T) {
+	ctx := context.Background()
+	base := &testSkillBackend{skills: []einoskill.Skill{
+		{FrontMatter: einoskill.FrontMatter{Name: "go-only", Description: "conditional"}},
+		{FrontMatter: einoskill.FrontMatter{Name: "always", Description: "visible"}},
+	}}
+	backend := &claudeSkillBackend{
+		base: base,
+		metadata: map[string]claudeSkillMetadata{
+			"go-only": {Paths: []string{"**/*.go"}},
+			"always":  {Paths: []string{"**"}},
+		},
+	}
+
+	list, err := backend.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := skillNames(list); got != "always" {
+		t.Fatalf("skills = %q, want always", got)
+	}
+}
+
+func TestClaudeSkillBackendAllowsUnrestrictedOverride(t *testing.T) {
+	ctx := context.Background()
+	base := &testSkillBackend{skills: []einoskill.Skill{
+		{FrontMatter: einoskill.FrontMatter{Name: "shared", Description: "override"}},
+	}}
+	backend := &claudeSkillBackend{
+		base: base,
+		metadata: map[string]claudeSkillMetadata{
+			"shared": {},
+		},
+	}
+
+	list, err := backend.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := skillNames(list); got != "shared" {
+		t.Fatalf("skills = %q, want shared", got)
+	}
+	if _, err := backend.Get(ctx, "shared"); err != nil {
+		t.Fatalf("unrestricted override should be available: %v", err)
+	}
+}
+
+func TestLoadClaudeSkillMetadataUsesFrontmatterName(t *testing.T) {
+	root := t.TempDir()
+	writeSkillFile(t, filepath.Join(root, "dir-name", "SKILL.md"), `---
+name: actual-name
+description: hidden
+disable-model-invocation: true
+paths: "**/*.go, **/*.md"
+---
+content
+`)
+
+	metadata, err := loadClaudeSkillMetadata(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, ok := metadata["actual-name"]
+	if !ok {
+		t.Fatalf("metadata keys = %#v, want actual-name", metadata)
+	}
+	if !meta.DisableModelInvocation {
+		t.Fatal("disable-model-invocation was not parsed")
+	}
+	if len(meta.Paths) != 2 || meta.Paths[0] != "**/*.go" || meta.Paths[1] != "**/*.md" {
+		t.Fatalf("paths = %#v, want sorted parsed paths", meta.Paths)
 	}
 }
 
@@ -204,4 +308,14 @@ func (m *skillHubTestModel) lastModel() string {
 		return ""
 	}
 	return m.models[len(m.models)-1]
+}
+
+func writeSkillFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }

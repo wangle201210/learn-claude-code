@@ -31,12 +31,20 @@ type skillModelHub struct {
 
 func buildSkillBackend(ctx context.Context, backend *workspace.Backend, root string) (einoskill.Backend, error) {
 	var backends []einoskill.Backend
+	metadata := map[string]claudeSkillMetadata{}
 	for _, dir := range skillDirs(root) {
 		if _, err := os.Stat(dir); err != nil {
 			if os.IsNotExist(err) {
 				continue
 			}
 			return nil, fmt.Errorf("stat skill dir %s: %w", dir, err)
+		}
+		nextMetadata, err := loadClaudeSkillMetadata(dir)
+		if err != nil {
+			return nil, err
+		}
+		for name, item := range nextMetadata {
+			metadata[name] = item
 		}
 		skillBackend, err := einoskill.NewBackendFromFilesystem(ctx, &einoskill.BackendFromFilesystemConfig{
 			Backend: backend,
@@ -50,10 +58,16 @@ func buildSkillBackend(ctx context.Context, backend *workspace.Backend, root str
 	if len(backends) == 0 {
 		return nil, nil
 	}
+	var skillBackend einoskill.Backend
 	if len(backends) == 1 {
-		return backends[0], nil
+		skillBackend = backends[0]
+	} else {
+		skillBackend = &compositeSkillBackend{backends: backends}
 	}
-	return &compositeSkillBackend{backends: backends}, nil
+	if len(metadata) == 0 {
+		return skillBackend, nil
+	}
+	return &claudeSkillBackend{base: skillBackend, metadata: metadata}, nil
 }
 
 func skillDirs(root string) []string {
