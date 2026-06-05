@@ -3,7 +3,7 @@ module github.com/wangle201210/learn-claude-code
 go 1.25.8
 
 require (
-	github.com/cloudwego/eino v0.9.0
+	github.com/cloudwego/eino v0.9.3
 	github.com/cloudwego/eino-ext/components/model/openai v0.1.13
 )
 
