@@ -43,7 +43,8 @@ func main() {
 		panic(err)
 	}
 
-	agent, runtimeState, err := agentapp.Build(ctx, primary, fallback, readLine)
+	history := &conversationHistory{}
+	agent, runtimeState, err := agentapp.Build(ctx, primary, fallback, readLine, history.replace)
 	if err != nil {
 		panic(err)
 	}
@@ -61,7 +62,6 @@ func main() {
 	fmt.Println("输入问题回车发送；q 或 exit 退出。")
 	fmt.Println()
 
-	history := &conversationHistory{}
 	for {
 		fmt.Print("\033[36m>> \033[0m")
 		line, err := stdin.ReadString('\n')
@@ -80,13 +80,14 @@ func main() {
 			query = strings.Join(notifications, "\n\n") + "\n\n" + query
 		}
 
+		history.beginRound()
 		input, userMessage := history.nextInput(query)
 		logger := cli.NewRunLogger()
 		logger.Log("开始处理请求")
 
 		// Runner.Query 每次都会新建 ADK run session；这里显式传入历史，保证多轮上下文连续。
 		iter := runner.Run(ctx, input)
-		roundMessages := []adk.Message{userMessage}
+		var roundMessages []adk.Message
 		for {
 			event, ok := iter.Next()
 			if !ok {
@@ -106,7 +107,7 @@ func main() {
 				roundMessages = append(roundMessages, msg)
 			}
 		}
-		history.commit(roundMessages)
+		history.commitFallback(userMessage, roundMessages)
 		fmt.Println()
 	}
 }

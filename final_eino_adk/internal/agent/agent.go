@@ -35,7 +35,7 @@ import (
 //     filesystem / plantask / skill 覆盖前面章节的大部分 harness 能力。
 //
 // 它替代了前 19 章手写的 agent loop、工具分发、s11 错误恢复等。
-func Build(ctx context.Context, primary, fallback model.ToolCallingChatModel, prompt permission.PromptFunc) (*adk.ChatModelAgent, *agentruntime.Runtime, error) {
+func Build(ctx context.Context, primary, fallback model.ToolCallingChatModel, prompt permission.PromptFunc, record HistoryRecorder) (*adk.ChatModelAgent, *agentruntime.Runtime, error) {
 	cwd, _ := os.Getwd()
 	root := workspace.Dir()
 
@@ -53,6 +53,7 @@ func Build(ctx context.Context, primary, fallback model.ToolCallingChatModel, pr
 	if err != nil {
 		return nil, nil, err
 	}
+	compactState := &compactController{}
 	summaryMW, err := summarization.New(ctx, &summarization.Config{
 		Model: primary,
 		Trigger: &summarization.TriggerCondition{
@@ -92,11 +93,13 @@ func Build(ctx context.Context, primary, fallback model.ToolCallingChatModel, pr
 	handlers := []adk.ChatModelAgentMiddleware{
 		patchMW,
 		permission.New(prompt),
+		newCompactMiddleware(compactState, summaryMW),
 		summaryMW,
 		reductionMW,
 		filesystemMW,
 		taskMW,
 		memory.NewMiddleware(primary),
+		newHistoryRecorderMiddleware(record),
 	}
 
 	if _, err := os.Stat(filepath.Join(root, "CLAUDE.md")); err == nil {
@@ -132,6 +135,12 @@ func Build(ctx context.Context, primary, fallback model.ToolCallingChatModel, pr
 	runtimeState.Start(ctx)
 
 	var extraTools []tool.BaseTool
+	compactTool, err := buildCompactTool(compactState)
+	if err != nil {
+		return nil, nil, err
+	}
+	extraTools = append(extraTools, compactTool)
+
 	agentTools, err := buildAgentTools(ctx, primary, workspaceBackend, prompt)
 	if err != nil {
 		return nil, nil, err
