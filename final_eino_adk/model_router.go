@@ -162,8 +162,9 @@ func (m *routedModel) route(ctx context.Context, input []*schema.Message, opts .
 	if !m.cfg.enabled() {
 		return modelRouteCall{opts: opts}
 	}
-	if model.GetCommonOptions(nil, opts...).Model != nil {
-		return modelRouteCall{opts: opts}
+	if explicit := model.GetCommonOptions(nil, opts...).Model; explicit != nil {
+		collector, callID := modelroute.Record(ctx, modelroute.Explicit, *explicit)
+		return modelRouteCall{usage: collector, callID: callID, opts: opts}
 	}
 
 	decision := routeDecision(ctx, input)

@@ -75,7 +75,7 @@ func FormatUsage(collector *UsageCollector) string {
 	}
 
 	var parts []string
-	for _, tier := range []Tier{Simple, Standard, Complex} {
+	for _, tier := range []Tier{Simple, Standard, Complex, Explicit} {
 		modelUsage := map[string]Usage{}
 		total := 0
 		for key, usage := range counts {

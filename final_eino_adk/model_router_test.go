@@ -529,6 +529,31 @@ func TestModelRouterRespectsExplicitModelOption(t *testing.T) {
 	}
 }
 
+func TestModelRouterRecordsExplicitModelUsage(t *testing.T) {
+	base := &captureModel{usage: &schema.TokenUsage{
+		PromptTokens:     4,
+		CompletionTokens: 3,
+		TotalTokens:      7,
+	}}
+	routed := newRoutedModel(base, modelRouterConfig{
+		defaultModel:  "complex-model",
+		simpleModel:   "simple-model",
+		standardModel: "standard-model",
+		complexModel:  "complex-model",
+	})
+	ctx, usage := withModelRouteUsage(context.Background())
+
+	_, err := routed.Generate(ctx, []*schema.Message{schema.UserMessage("hello")}, model.WithModel("manual-model"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := "model route 本轮: explicit=1(manual-model){tokens=7,in=4,out=3}"
+	if got := formatModelRouteUsage(usage); got != want {
+		t.Fatalf("usage = %q, want %q", got, want)
+	}
+}
+
 func TestModelRouterWithToolsKeepsRouting(t *testing.T) {
 	base := &captureModel{}
 	routed, err := newRoutedModel(base, modelRouterConfig{

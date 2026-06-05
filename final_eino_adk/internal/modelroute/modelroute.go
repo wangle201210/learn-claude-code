@@ -13,6 +13,7 @@ const (
 	Simple   Tier = "simple"
 	Standard Tier = "standard"
 	Complex  Tier = "complex"
+	Explicit Tier = "explicit"
 )
 
 type contextKey struct{}
@@ -82,7 +83,7 @@ func (m *hintedToolCallingModel) WithTools(tools []*schema.ToolInfo) (model.Tool
 
 func validTier(tier Tier) bool {
 	switch tier {
-	case Simple, Standard, Complex:
+	case Simple, Standard, Complex, Explicit:
 		return true
 	default:
 		return false
