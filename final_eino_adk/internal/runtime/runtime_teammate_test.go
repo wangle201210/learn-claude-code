@@ -12,6 +12,7 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/modelroute"
 	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/permission"
 	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/workspace"
 )
@@ -45,6 +46,38 @@ func TestSpawnTeammateWritesResultToMainMailbox(t *testing.T) {
 	}
 	if !strings.Contains(notes[0], `kind="teammate_result"`) || !strings.Contains(notes[0], "teammate result") {
 		t.Fatalf("notification = %q", notes[0])
+	}
+}
+
+func TestSpawnTeammateNotificationIncludesModelRouteUsage(t *testing.T) {
+	ctx := context.Background()
+	r := New(t.TempDir())
+	r.teammateIdle = 20 * time.Millisecond
+	r.Start(ctx)
+	backend, err := workspace.New(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := &routeUsageTeammateTestModel{usage: &schema.TokenUsage{
+		PromptTokens:     4,
+		CompletionTokens: 3,
+		TotalTokens:      7,
+	}}
+
+	if _, err := r.spawnTeammate(ctx, model, backend, denyPrompt, &spawnTeammateArgs{
+		Name:   "reviewer",
+		Role:   "reviewer",
+		Prompt: "review the plan",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	notes := waitRuntimeNotifications(r, time.Second, "model route 本轮")
+	if len(notes) != 1 {
+		t.Fatalf("notifications = %v, want one teammate result", notes)
+	}
+	if !strings.Contains(notes[0], "simple=1(simple-model){tokens=7,in=4,out=3}") {
+		t.Fatalf("notification missing model route usage: %q", notes[0])
 	}
 }
 
@@ -227,10 +260,17 @@ func containsText(values []string, needle string) bool {
 	return false
 }
 
-type teammateTestModel struct{}
+type teammateTestModel struct {
+	usage *schema.TokenUsage
+}
 
 func (m *teammateTestModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-	return schema.AssistantMessage("teammate result", nil), nil
+	msg := schema.AssistantMessage("teammate result", nil)
+	if m.usage != nil {
+		usage := *m.usage
+		msg.ResponseMeta = &schema.ResponseMeta{Usage: &usage}
+	}
+	return msg, nil
 }
 
 func (m *teammateTestModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
@@ -242,6 +282,35 @@ func (m *teammateTestModel) Stream(ctx context.Context, input []*schema.Message,
 }
 
 func (m *teammateTestModel) WithTools(_ []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return m, nil
+}
+
+type routeUsageTeammateTestModel struct {
+	usage *schema.TokenUsage
+}
+
+func (m *routeUsageTeammateTestModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	collector, callID := modelroute.Record(ctx, modelroute.Simple, "simple-model")
+	msg := schema.AssistantMessage("teammate result", nil)
+	if m.usage != nil {
+		usage := *m.usage
+		msg.ResponseMeta = &schema.ResponseMeta{Usage: &usage}
+		if collector != nil {
+			collector.AddUsage(callID, &usage)
+		}
+	}
+	return msg, nil
+}
+
+func (m *routeUsageTeammateTestModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	msg, err := m.Generate(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
+}
+
+func (m *routeUsageTeammateTestModel) WithTools(_ []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
 	return m, nil
 }
 

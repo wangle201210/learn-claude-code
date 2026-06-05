@@ -15,6 +15,7 @@ import (
 	"github.com/cloudwego/eino/adk/middlewares/reduction"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/modelroute"
 	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/permission"
 	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/workspace"
 )
@@ -75,8 +76,9 @@ func (r *Runtime) spawnTeammate(ctx context.Context, primary model.ToolCallingCh
 }
 
 func (r *Runtime) runTeammate(_ context.Context, primary model.ToolCallingChatModel, workspaceBackend *workspace.Backend, prompt permission.PromptFunc, name, role, taskPrompt string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	baseCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
+	ctx, routeUsage := modelroute.WithUsage(baseCtx)
 
 	result, err := r.runTeammateLifecycle(ctx, primary, workspaceBackend, prompt, name, role, taskPrompt)
 	status := "succeeded"
@@ -87,6 +89,9 @@ func (r *Runtime) runTeammate(_ context.Context, primary model.ToolCallingChatMo
 	}
 	if strings.TrimSpace(body) == "" {
 		body = "Teammate completed without a text result."
+	}
+	if summary := modelroute.FormatUsage(routeUsage); summary != "" {
+		body = strings.TrimSpace(body) + "\n\n" + summary
 	}
 
 	r.mu.Lock()

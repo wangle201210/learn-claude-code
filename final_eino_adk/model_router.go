@@ -146,7 +146,7 @@ func (m *routedModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChat
 }
 
 type modelRouteCall struct {
-	usage  *modelRouteUsageCollector
+	usage  *modelroute.UsageCollector
 	callID int
 	opts   []model.Option
 }
@@ -155,7 +155,7 @@ func (c modelRouteCall) recordUsage(msg *schema.Message) {
 	if c.usage == nil || msg == nil || msg.ResponseMeta == nil || msg.ResponseMeta.Usage == nil {
 		return
 	}
-	c.usage.addUsage(c.callID, msg.ResponseMeta.Usage)
+	c.usage.AddUsage(c.callID, msg.ResponseMeta.Usage)
 }
 
 func (m *routedModel) route(ctx context.Context, input []*schema.Message, opts ...model.Option) modelRouteCall {
@@ -168,7 +168,7 @@ func (m *routedModel) route(ctx context.Context, input []*schema.Message, opts .
 
 	decision := routeDecision(ctx, input)
 	selected := m.cfg.modelForTier(decision.tier)
-	collector, callID := recordModelRoute(ctx, decision.tier, selected)
+	collector, callID := modelroute.Record(ctx, toModelRouteTier(decision.tier), selected)
 	if selected == "" || selected == m.cfg.defaultModel {
 		return modelRouteCall{usage: collector, callID: callID, opts: opts}
 	}
@@ -190,6 +190,19 @@ func routeDecision(ctx context.Context, input []*schema.Message) modelRouteDecis
 		}
 	}
 	return classifyModelRoute(input)
+}
+
+func toModelRouteTier(tier modelRouteTier) modelroute.Tier {
+	switch tier {
+	case modelRouteSimple:
+		return modelroute.Simple
+	case modelRouteStandard:
+		return modelroute.Standard
+	case modelRouteComplex:
+		return modelroute.Complex
+	default:
+		return ""
+	}
 }
 
 func firstNonEmptyEnv(keys ...string) string {
