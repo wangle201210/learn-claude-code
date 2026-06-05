@@ -11,7 +11,10 @@ import (
 
 type HistoryRecorder func([]adk.Message)
 
-const compactControlExtraKey = "final_eino_compact_control"
+const (
+	compactControlExtraKey = "final_eino_compact_control"
+	agentsMDExtraKey       = "__agentsmd_content__"
+)
 
 type CompactController struct {
 	mu       sync.Mutex
@@ -117,6 +120,9 @@ func copyHistoryMessages(messages []adk.Message) []adk.Message {
 	skipCompactConfirmation := false
 	for _, msg := range messages {
 		if msg != nil && msg.Role == schema.System {
+			continue
+		}
+		if hasMessageExtra(msg, agentsMDExtraKey) {
 			continue
 		}
 		if hasMessageExtra(msg, "final_eino_memory_context") {

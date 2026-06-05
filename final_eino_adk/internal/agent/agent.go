@@ -93,20 +93,9 @@ func Build(ctx context.Context, primary, fallback model.ToolCallingChatModel, pr
 	if err != nil {
 		return nil, nil, err
 	}
-	handlers := []adk.ChatModelAgentMiddleware{
-		patchMW,
-		permission.New(prompt),
-		newCompactMiddleware(compactState, summaryMW),
-		summaryMW,
-		reductionMW,
-		filesystemMW,
-		taskMW,
-		memory.NewMiddleware(primary),
-		newHistoryRecorderMiddleware(record),
-	}
-
+	var agentsMW adk.ChatModelAgentMiddleware
 	if _, err := os.Stat(filepath.Join(root, "CLAUDE.md")); err == nil {
-		agentsMW, err := agentsmd.New(ctx, &agentsmd.Config{
+		agentsMW, err = agentsmd.New(ctx, &agentsmd.Config{
 			Backend:             workspaceBackend,
 			AgentsMDFiles:       []string{filepath.Join(root, "CLAUDE.md")},
 			AllAgentsMDMaxBytes: 100000,
@@ -114,8 +103,26 @@ func Build(ctx context.Context, primary, fallback model.ToolCallingChatModel, pr
 		if err != nil {
 			return nil, nil, err
 		}
-		handlers = append([]adk.ChatModelAgentMiddleware{handlers[0], agentsMW}, handlers[1:]...)
 	}
+
+	handlers := []adk.ChatModelAgentMiddleware{
+		patchMW,
+		permission.New(prompt),
+		newCompactMiddleware(compactState, summaryMW),
+		summaryMW,
+	}
+	if agentsMW != nil {
+		// Eino agentsmd is transient model-call context. Keep it after summarization
+		// so context compaction summarizes conversation state rather than CLAUDE.md.
+		handlers = append(handlers, agentsMW)
+	}
+	handlers = append(handlers,
+		reductionMW,
+		filesystemMW,
+		taskMW,
+		memory.NewMiddleware(primary),
+		newHistoryRecorderMiddleware(record),
+	)
 
 	if _, err := os.Stat(filepath.Join(root, "skills")); err == nil {
 		skillBackend, err := skill.NewBackendFromFilesystem(ctx, &skill.BackendFromFilesystemConfig{

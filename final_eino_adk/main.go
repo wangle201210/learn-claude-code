@@ -85,18 +85,26 @@ func main() {
 			runAgent(ctx, runner, history, input, nil, "手动压缩上下文")
 			continue
 		}
-		notifications := runtimeState.CollectNotifications()
-		if query == "" && len(notifications) == 0 {
-			break
-		}
-		if len(notifications) > 0 {
-			query = strings.Join(notifications, "\n\n") + "\n\n" + query
+		var shouldRun bool
+		query, shouldRun = prepareQuery(query, runtimeState.CollectNotifications())
+		if !shouldRun {
+			continue
 		}
 
 		history.beginRound()
 		input, userMessage := history.nextInput(query)
 		runAgent(ctx, runner, history, input, userMessage, "开始处理请求")
 	}
+}
+
+func prepareQuery(query string, notifications []string) (string, bool) {
+	if query == "" && len(notifications) == 0 {
+		return "", false
+	}
+	if len(notifications) > 0 {
+		return strings.Join(notifications, "\n\n") + "\n\n" + query, true
+	}
+	return query, true
 }
 
 func isManualCompact(query string) bool {

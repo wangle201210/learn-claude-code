@@ -89,6 +89,31 @@ func TestHistoryRecorderFiltersMemoryContext(t *testing.T) {
 	}
 }
 
+func TestHistoryRecorderFiltersAgentsMDContext(t *testing.T) {
+	var recorded []adk.Message
+	mw := newHistoryRecorderMiddleware(func(messages []adk.Message) {
+		recorded = messages
+	})
+
+	_, err := mw.AfterAgent(context.Background(), &adk.ChatModelAgentState{
+		Messages: []adk.Message{
+			schema.UserMessage("keep"),
+			agentsMDContextMessage("drop"),
+			schema.AssistantMessage("answer", nil),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(recorded) != 2 {
+		t.Fatalf("recorded %d messages, want 2", len(recorded))
+	}
+	if recorded[0].Content != "keep" || recorded[1].Content != "answer" {
+		t.Fatalf("recorded messages = %#v", recorded)
+	}
+}
+
 func TestHistoryRecorderFiltersSystemMessages(t *testing.T) {
 	var recorded []adk.Message
 	mw := newHistoryRecorderMiddleware(func(messages []adk.Message) {
@@ -142,6 +167,12 @@ func TestHistoryRecorderFiltersCompactConfirmation(t *testing.T) {
 func memoryContextMessage(content string) adk.Message {
 	msg := schema.UserMessage(content)
 	msg.Extra = map[string]any{"final_eino_memory_context": true}
+	return msg
+}
+
+func agentsMDContextMessage(content string) adk.Message {
+	msg := schema.UserMessage(content)
+	msg.Extra = map[string]any{agentsMDExtraKey: true}
 	return msg
 }
 
