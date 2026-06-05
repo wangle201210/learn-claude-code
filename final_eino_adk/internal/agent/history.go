@@ -116,6 +116,9 @@ func copyHistoryMessages(messages []adk.Message) []adk.Message {
 	out := make([]adk.Message, 0, len(messages))
 	skipCompactConfirmation := false
 	for _, msg := range messages {
+		if msg != nil && msg.Role == schema.System {
+			continue
+		}
 		if hasMessageExtra(msg, "final_eino_memory_context") {
 			continue
 		}

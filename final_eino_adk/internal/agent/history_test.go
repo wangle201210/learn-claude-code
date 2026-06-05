@@ -89,6 +89,31 @@ func TestHistoryRecorderFiltersMemoryContext(t *testing.T) {
 	}
 }
 
+func TestHistoryRecorderFiltersSystemMessages(t *testing.T) {
+	var recorded []adk.Message
+	mw := newHistoryRecorderMiddleware(func(messages []adk.Message) {
+		recorded = messages
+	})
+
+	_, err := mw.AfterAgent(context.Background(), &adk.ChatModelAgentState{
+		Messages: []adk.Message{
+			schema.SystemMessage("agent instruction"),
+			schema.UserMessage("keep"),
+			schema.AssistantMessage("answer", nil),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(recorded) != 2 {
+		t.Fatalf("recorded %d messages, want user + assistant", len(recorded))
+	}
+	if recorded[0].Role != schema.User || recorded[1].Role != schema.Assistant {
+		t.Fatalf("recorded messages = %#v", recorded)
+	}
+}
+
 func TestHistoryRecorderFiltersCompactConfirmation(t *testing.T) {
 	var recorded []adk.Message
 	mw := newHistoryRecorderMiddleware(func(messages []adk.Message) {
