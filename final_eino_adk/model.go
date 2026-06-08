@@ -6,11 +6,15 @@ import (
 
 	"github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/components/model"
+	"github.com/wangle201210/learn-claude-code/internal/modelenv"
 )
 
 // NewModel 返回主模型：从 OPENAI_API_KEY / OPENAI_MODEL / OPENAI_BASE_URL 读配置。
 // 与 s01_agent_loop 的同名函数等价；这里作为根目录最终版 agent 的主底座。
 func NewModel(ctx context.Context) (model.ToolCallingChatModel, error) {
+	if err := modelenv.Require(); err != nil {
+		return nil, err
+	}
 	maxTokens := 1024_000
 	base, err := openai.NewChatModel(ctx, &openai.ChatModelConfig{
 		Model:               os.Getenv("OPENAI_MODEL"),
@@ -31,6 +35,9 @@ func NewFallbackModel(ctx context.Context) (model.ToolCallingChatModel, error) {
 	name := os.Getenv("OPENAI_FALLBACK_MODEL")
 	if name == "" {
 		return nil, nil
+	}
+	if err := modelenv.Require(); err != nil {
+		return nil, err
 	}
 	maxTokens := 1024_000
 	return openai.NewChatModel(ctx, &openai.ChatModelConfig{

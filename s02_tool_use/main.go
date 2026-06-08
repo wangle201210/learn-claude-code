@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/cloudwego/eino/schema"
+	"github.com/wangle201210/learn-claude-code/internal/cliexit"
 )
 
 func main() {
@@ -15,7 +16,7 @@ func main() {
 
 	base, err := NewModel(ctx)
 	if err != nil {
-		panic(err)
+		cliexit.ExitWithError(err)
 	}
 	// 把全部 5 个工具绑定到模型。
 	agent, err := base.WithTools(toolInfos())

@@ -38,6 +38,21 @@ func TestNewFallbackModelRequiresFallbackModelEnv(t *testing.T) {
 	}
 }
 
+func TestNewFallbackModelValidatesSharedModelEnvWhenEnabled(t *testing.T) {
+	t.Setenv("OPENAI_FALLBACK_MODEL", "fallback-model")
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("OPENAI_MODEL", "primary-model")
+	t.Setenv("OPENAI_BASE_URL", "https://example.test/v1")
+
+	fallback, err := NewFallbackModel(context.Background())
+	if err == nil {
+		t.Fatal("fallback model should validate shared model env")
+	}
+	if fallback != nil {
+		t.Fatal("fallback model should be nil when shared env is invalid")
+	}
+}
+
 func TestPrepareQuerySkipsBlankInputWithoutNotifications(t *testing.T) {
 	query, ok := prepareQuery("", nil)
 	if ok {

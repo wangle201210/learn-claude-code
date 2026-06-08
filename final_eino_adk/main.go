@@ -12,6 +12,7 @@ import (
 	agentapp "github.com/wangle201210/learn-claude-code/final_eino_adk/internal/agent"
 	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/cli"
 	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/recovery"
+	"github.com/wangle201210/learn-claude-code/internal/cliexit"
 )
 
 var stdin = bufio.NewReader(os.Stdin)
@@ -38,18 +39,18 @@ func main() {
 
 	primary, err := NewModel(ctx)
 	if err != nil {
-		panic(err)
+		cliexit.ExitWithError(err)
 	}
 	fallback, err := NewFallbackModel(ctx)
 	if err != nil {
-		panic(err)
+		cliexit.ExitWithError(err)
 	}
 
 	history := &conversationHistory{}
 	compactController := agentapp.NewCompactController()
 	agent, runtimeState, err := agentapp.Build(ctx, primary, fallback, readLine, history.replace, compactController)
 	if err != nil {
-		panic(err)
+		cliexit.ExitWithError(err)
 	}
 
 	// EnableStreaming=true：模型生成 token 即推事件，逐 token 打印。

@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/cloudwego/eino/schema"
+	"github.com/wangle201210/learn-claude-code/internal/cliexit"
 )
 
 func main() {
@@ -12,7 +13,7 @@ func main() {
 
 	base, err := NewModel(ctx)
 	if err != nil {
-		panic(err)
+		cliexit.ExitWithError(err)
 	}
 	agent, err := base.WithTools(toolInfos())
 	if err != nil {

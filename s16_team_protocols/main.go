@@ -8,6 +8,7 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+	"github.com/wangle201210/learn-claude-code/internal/cliexit"
 )
 
 // s14: 把 messages 提到 session 级，让 queueProcessorLoop 也能在用户输入
@@ -72,7 +73,7 @@ func main() {
 
 	base, err := NewModel(sessionCtx)
 	if err != nil {
-		panic(err)
+		cliexit.ExitWithError(err)
 	}
 	sessionAgent, err = base.WithTools(toolInfos())
 	if err != nil {
