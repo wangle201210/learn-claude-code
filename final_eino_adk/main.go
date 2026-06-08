@@ -58,7 +58,6 @@ func main() {
 		EnableStreaming: true,
 	})
 
-	fmt.Println("final: eino adk 版 agent（前 19 章手写的等价能力，~320 行）")
 	if fallback != nil {
 		fmt.Println("       failover 已启用（OPENAI_FALLBACK_MODEL 触发）")
 	}
