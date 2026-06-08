@@ -11,7 +11,7 @@ import (
 // NewModel 返回主模型：从 OPENAI_API_KEY / OPENAI_MODEL / OPENAI_BASE_URL 读配置。
 // 与 s01_agent_loop 的同名函数等价；这里作为根目录最终版 agent 的主底座。
 func NewModel(ctx context.Context) (model.ToolCallingChatModel, error) {
-	maxTokens := 80000
+	maxTokens := 1024_000
 	base, err := openai.NewChatModel(ctx, &openai.ChatModelConfig{
 		Model:               os.Getenv("OPENAI_MODEL"),
 		APIKey:              os.Getenv("OPENAI_API_KEY"),
@@ -32,7 +32,7 @@ func NewFallbackModel(ctx context.Context) (model.ToolCallingChatModel, error) {
 	if name == "" {
 		return nil, nil
 	}
-	maxTokens := 80000
+	maxTokens := 1024_000
 	return openai.NewChatModel(ctx, &openai.ChatModelConfig{
 		Model:               name,
 		APIKey:              os.Getenv("OPENAI_API_KEY"),
