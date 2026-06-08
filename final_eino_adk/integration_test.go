@@ -168,6 +168,41 @@ func TestFinalAgentContinuesAfterMaxTokensWithOfficialRetry(t *testing.T) {
 	}
 }
 
+func TestFinalAgentContinuesAfterToolError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	fake := newFinalTestModel()
+	fake.enqueueResponses(
+		responseWithToolCall("call-grep", "grep", `{"pattern":"[","path":".","output_mode":"content"}`),
+		schema.AssistantMessage("continued after tool error", nil),
+	)
+	history := &conversationHistory{}
+	compactController := agentapp.NewCompactController()
+	agent, _, err := agentapp.Build(ctx, fake, nil, denyPrompt, history.replace, compactController)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent})
+
+	history.beginRound()
+	input, userMessage := history.nextInput("search with a bad regex")
+	result := runAgent(ctx, runner, history, input, userMessage, "test tool error")
+
+	if result.Err != nil {
+		t.Fatalf("run err = %v, want recovered tool error", result.Err)
+	}
+	inputs := fake.agentInputs()
+	if len(inputs) != 2 {
+		t.Fatalf("agent model calls = %d, want tool-call turn + recovery turn", len(inputs))
+	}
+	if !messageContentsContain(inputs[1], "Tool error from grep") {
+		t.Fatalf("second model input missing tool error feedback:\n%s", formatMessages(inputs[1]))
+	}
+	if !messageContentsContain(history.copyMessages(), "continued after tool error") {
+		t.Fatalf("stored history missing final answer:\n%s", formatMessages(history.copyMessages()))
+	}
+}
+
 func TestFinalAgentRunsUserPromptSubmitHookAsTransientContext(t *testing.T) {
 	t.Setenv("FINAL_EINO_HOOKS", `{
 		"hooks": {

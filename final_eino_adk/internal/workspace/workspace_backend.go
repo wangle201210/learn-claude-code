@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/cloudwego/eino-ext/adk/backend/local"
@@ -17,6 +19,8 @@ type Backend struct {
 	adkfs.Backend
 	shell adkfs.Shell
 }
+
+var validGrepFileTypePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
 
 func New(ctx context.Context, validateCommand func(string) error) (*Backend, error) {
 	localBackend, err := local.NewBackend(ctx, &local.Config{ValidateCommand: validateCommand})
@@ -61,11 +65,31 @@ func (b *Backend) GrepRaw(ctx context.Context, req *adkfs.GrepRequest) ([]adkfs.
 	}
 	next := *req
 	next.Path = p
+	next.FileType = sanitizeGrepFileType(next.FileType)
 	matches, err := b.Backend.GrepRaw(ctx, &next)
 	if err != nil {
+		if next.FileType != "" && isUnrecognizedRipgrepFileTypeError(err) {
+			next.FileType = ""
+			return b.Backend.GrepRaw(ctx, &next)
+		}
 		return nil, err
 	}
 	return matches, nil
+}
+
+func sanitizeGrepFileType(fileType string) string {
+	fileType = strings.TrimSpace(fileType)
+	if !validGrepFileTypePattern.MatchString(fileType) {
+		return ""
+	}
+	return fileType
+}
+
+func isUnrecognizedRipgrepFileTypeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "unrecognized file type")
 }
 
 func (b *Backend) GlobInfo(ctx context.Context, req *adkfs.GlobInfoRequest) ([]adkfs.FileInfo, error) {

@@ -122,6 +122,7 @@ func Build(ctx context.Context, primary, fallback model.ToolCallingChatModel, pr
 		return nil, nil, err
 	}
 	handlers := []adk.ChatModelAgentMiddleware{
+		newToolErrorRecoveryMiddleware(),
 		patchMW,
 		permissionMW,
 		newCompactMiddleware(compactState, summaryMW),
