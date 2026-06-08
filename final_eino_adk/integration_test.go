@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -200,6 +202,43 @@ func TestFinalAgentContinuesAfterToolError(t *testing.T) {
 	}
 	if !messageContentsContain(history.copyMessages(), "continued after tool error") {
 		t.Fatalf("stored history missing final answer:\n%s", formatMessages(history.copyMessages()))
+	}
+}
+
+func TestRunAgentReportsMissingEnvWhenModelProducesNoOutput(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("OPENAI_MODEL", "")
+	t.Setenv("OPENAI_BASE_URL", "")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	fake := newFinalTestModel()
+	fake.enqueueResponses(schema.AssistantMessage("", nil))
+	history := &conversationHistory{}
+	compactController := agentapp.NewCompactController()
+	agent, _, err := agentapp.Build(ctx, fake, nil, denyPrompt, history.replace, compactController)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent})
+
+	history.beginRound()
+	input, userMessage := history.nextInput("hi")
+	var result agentRunResult
+	output := captureStdout(t, func() {
+		result = runAgent(ctx, runner, history, input, userMessage, "test")
+	})
+
+	if result.Err == nil {
+		t.Fatal("runAgent should report empty model output as an error")
+	}
+	if !strings.Contains(output, "模型没有返回内容") {
+		t.Fatalf("output %q should explain empty model output", output)
+	}
+	for _, want := range []string{"OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output %q should mention missing %s", output, want)
+		}
 	}
 }
 
@@ -777,6 +816,33 @@ func assertModelsContain(t *testing.T, got []string, want string) {
 		}
 	}
 	t.Fatalf("model selections = %v, want to contain %q", got, want)
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = writer
+	defer func() {
+		os.Stdout = old
+	}()
+
+	fn()
+
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	out, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
 }
 
 func formatMessages(messages []*schema.Message) string {

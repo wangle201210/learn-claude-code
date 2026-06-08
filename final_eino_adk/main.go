@@ -9,10 +9,12 @@ import (
 	"strings"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/schema"
 	agentapp "github.com/wangle201210/learn-claude-code/final_eino_adk/internal/agent"
 	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/cli"
 	"github.com/wangle201210/learn-claude-code/final_eino_adk/internal/recovery"
 	"github.com/wangle201210/learn-claude-code/internal/cliexit"
+	"github.com/wangle201210/learn-claude-code/internal/modelenv"
 )
 
 var stdin = bufio.NewReader(os.Stdin)
@@ -37,6 +39,9 @@ func readLine(prompt string) (string, bool) {
 func main() {
 	ctx := context.Background()
 
+	if err := modelenv.Require(); err != nil {
+		cliexit.ExitWithError(err)
+	}
 	primary, err := NewModel(ctx)
 	if err != nil {
 		cliexit.ExitWithError(err)
@@ -135,6 +140,7 @@ func runAgent(ctx context.Context, runner *adk.Runner, history *conversationHist
 	iter := runner.Run(runCtx, input)
 	var roundMessages []adk.Message
 	var runErr error
+	var sawModelActivity bool
 	for {
 		event, ok := iter.Next()
 		if !ok {
@@ -163,8 +169,16 @@ func runAgent(ctx context.Context, runner *adk.Runner, history *conversationHist
 			break
 		}
 		if msg != nil {
+			if hasVisibleModelActivity(msg) {
+				sawModelActivity = true
+			}
 			roundMessages = append(roundMessages, msg)
 		}
+	}
+	if runErr == nil && !sawModelActivity {
+		runErr = noModelOutputError()
+		logger.Log("模型没有返回内容")
+		fmt.Printf("\033[31m%v\033[0m\n", runErr)
 	}
 	if summary := formatModelRouteUsage(routeUsage); summary != "" {
 		logger.Log(summary)
@@ -192,6 +206,27 @@ func runAgentWithRecovery(ctx context.Context, runner *adk.Runner, history *conv
 		return result
 	}
 	return runAgent(ctx, runner, history, retryInput, userMessage, "反应式压缩后重试")
+}
+
+func hasVisibleModelActivity(msg adk.Message) bool {
+	if msg == nil {
+		return false
+	}
+	switch msg.Role {
+	case schema.Assistant:
+		return strings.TrimSpace(msg.Content) != "" || len(msg.ToolCalls) > 0
+	case schema.Tool:
+		return true
+	default:
+		return false
+	}
+}
+
+func noModelOutputError() error {
+	if err := modelenv.Require(); err != nil {
+		return fmt.Errorf("模型没有返回内容；%w", err)
+	}
+	return errors.New("模型没有返回内容；请检查 OPENAI_API_KEY / OPENAI_MODEL / OPENAI_BASE_URL 是否指向可用模型，或检查网关/网络日志")
 }
 
 func isRecoveringRetryError(err error) bool {
